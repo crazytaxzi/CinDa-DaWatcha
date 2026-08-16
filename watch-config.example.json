@@ -1,0 +1,38 @@
+{
+  "settings": {
+    "chatBaseUrl": "https://chatgpt.com",
+    "conversationLimitBytes": 5242880,
+    "pollIntervalMs": 1000,
+    "completionStablePolls": 2,
+    "handoffRetries": 2,
+    "batchWindowMs": 3000,
+    "firefoxBinary": "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
+    "firefoxProfileDirectory": "C:\\Users\\YOUR_USER\\AppData\\Local\\CinDa-DaWatcha\\FirefoxProfile"
+  },
+  "watches": [
+    {
+      "id": "worker-01",
+      "enabled": false,
+      "process": {
+        "pid": 12345,
+        "name": "worker.exe",
+        "executablePath": "C:\\Apps\\Worker\\worker.exe",
+        "startTimeUtc": "2026-08-15T18:42:12Z"
+      },
+      "completion": {
+        "method": "uia-text",
+        "patterns": [
+          "Completed",
+          "Finished",
+          "Done",
+          "Success"
+        ],
+        "windowTitlePattern": ""
+      },
+      "chat": {
+        "uuid": "00000000-0000-0000-0000-000000000000"
+      },
+      "passalongMessage": "Review this completed task and continue with the next step."
+    }
+  ]
+}
