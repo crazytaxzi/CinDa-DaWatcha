@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/crazytaxzi/CinDa-DaWatcha/blob/main/docs/watch-config.schema.json",
+  "title": "CinDa-DaWatcha watched file",
+  "description": "Strict schema for the JSON control file consumed by CinDa-DaWatcha.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "settings",
+    "watches"
+  ],
+  "properties": {
+    "settings": {
+      "$ref": "#/$defs/settings"
+    },
+    "watches": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/watch"
+      }
+    }
+  },
+  "$defs": {
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chatBaseUrl",
+        "conversationLimitBytes",
+        "pollIntervalMs",
+        "completionStablePolls",
+        "handoffRetries",
+        "batchWindowMs",
+        "firefoxBinary",
+        "firefoxProfileDirectory"
+      ],
+      "properties": {
+        "chatBaseUrl": {
+          "type": "string",
+          "const": "https://chatgpt.com",
+          "description": "Trusted ChatGPT origin. Paths, queries, and fragments are forbidden."
+        },
+        "conversationLimitBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 5242880,
+          "description": "Rollover threshold for visible conversation text encoded as UTF-8."
+        },
+        "pollIntervalMs": {
+          "type": "integer",
+          "minimum": 250,
+          "default": 1000,
+          "description": "Delay between process and completion checks."
+        },
+        "completionStablePolls": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2,
+          "description": "Consecutive positive polls required before a visual completion trigger."
+        },
+        "handoffRetries": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2,
+          "description": "Total normal handoff attempt count, including the first attempt."
+        },
+        "batchWindowMs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3000,
+          "description": "Time window used to collect events before grouping them by UUID."
+        },
+        "firefoxBinary": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute path to firefox.exe."
+        },
+        "firefoxProfileDirectory": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute path to a profile directory dedicated to CinDa-DaWatcha."
+        }
+      }
+    },
+    "watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "enabled",
+        "process",
+        "completion",
+        "chat",
+        "passalongMessage"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Stable, case-insensitively unique logical watch identifier."
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "process": {
+          "$ref": "#/$defs/process"
+        },
+        "completion": {
+          "$ref": "#/$defs/completion"
+        },
+        "chat": {
+          "$ref": "#/$defs/chat"
+        },
+        "passalongMessage": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Literal, non-secret instruction included in the process handoff."
+        }
+      }
+    },
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "name",
+        "executablePath",
+        "startTimeUtc"
+      ],
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "executablePath": {
+          "type": "string",
+          "minLength": 3,
+          "description": "Absolute Windows executable path captured from the live PID."
+        },
+        "startTimeUtc": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$",
+          "description": "UTC process start timestamp captured from the live PID."
+        }
+      }
+    },
+    "completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "patterns",
+        "windowTitlePattern"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "uia-text",
+            "title"
+          ]
+        },
+        "patterns": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "windowTitlePattern": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "uia-text"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "properties": {
+              "patterns": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "title"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "properties": {
+              "windowTitlePattern": {
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "chat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uuid"
+      ],
+      "properties": {
+        "uuid": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$",
+          "description": "UUID copied from the intended ChatGPT /c/{uuid} URL."
+        }
+      }
+    }
+  }
+}

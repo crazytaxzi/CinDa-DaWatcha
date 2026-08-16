@@ -49,7 +49,10 @@ and profiles remain untouched.
 
 ## Configure a watch
 
-Copy the shape in [watch-config.example.json](watch-config.example.json).
+Use the normative [watched-file instruction manual](docs/watch-file-manual.md)
+and its machine-readable [JSON Schema](docs/watch-config.schema.json). Copy the
+starting shape in [watch-config.example.json](watch-config.example.json).
+
 To capture a process fingerprint:
 
 ```powershell

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using CinDa.DaWatcha.Core;
+using Json.Schema;
 
 namespace CinDa.DaWatcha.Core.Tests;
 
@@ -76,6 +77,28 @@ public sealed class CoreBehaviorTests
     }
 
     [Fact]
+    public void Example_matches_schema_and_runtime_model()
+    {
+        var schemaText = File.ReadAllText(
+            FindRepositoryFile(@"docs\watch-config.schema.json"));
+        var exampleText = File.ReadAllText(
+            FindRepositoryFile("watch-config.example.json"));
+
+        var schema = JsonSchema.FromText(schemaText);
+        using var instance = JsonDocument.Parse(exampleText);
+        var result = schema.Evaluate(instance.RootElement);
+        Assert.True(result.IsValid, result.ToString());
+
+        var config = JsonSerializer.Deserialize<WatchConfiguration>(
+            exampleText, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+        Assert.NotNull(config);
+        Assert.Empty(ConfigurationValidator.Validate(config));
+    }
+
+    [Fact]
     public async Task Monitor_emits_only_one_completion_per_process_run()
     {
         using var process = Process.GetCurrentProcess();
@@ -103,6 +126,21 @@ public sealed class CoreBehaviorTests
 
         Assert.Single(events);
         Assert.Equal(WatchTriggerKind.Completion, events[0].Trigger);
+    }
+
+    private static string FindRepositoryFile(string relativePath)
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory);
+             directory is not null;
+             directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, relativePath);
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        throw new FileNotFoundException(
+            $"Could not find repository file: {relativePath}");
     }
 
     private static WatchConfiguration CreateConfiguration() =>
