@@ -124,7 +124,7 @@ public sealed class CoreBehaviorTests
             var cancellationToken = TestContext.Current.CancellationToken;
             var path = Path.Combine(directory.FullName, "watch-config.json");
             var options = ConfigurationJson.CreateOptions(writeIndented: true);
-            var initial = CreateConfiguration();
+            var initial = CreateLedgerConfiguration();
             await File.WriteAllTextAsync(path,
                 JsonSerializer.Serialize(initial, options), cancellationToken);
             using var service = new WatchConfigurationService(path);
@@ -134,7 +134,7 @@ public sealed class CoreBehaviorTests
             service.ConfigurationChanged += config => received.TrySetResult(config);
             service.StartWatching();
 
-            var changed = CreateConfiguration();
+            var changed = CreateLedgerConfiguration();
             changed.Jobs[0].Id = initial.Jobs[0].Id;
             changed.Jobs[0].InitiatingChatUuid =
                 initial.Jobs[0].InitiatingChatUuid;
@@ -148,6 +148,67 @@ public sealed class CoreBehaviorTests
                 TimeSpan.FromSeconds(5), cancellationToken);
             Assert.Equal("Atomic external update received",
                 reloaded.Jobs[0].Summary);
+        }
+        finally
+        {
+            directory.Delete(true);
+        }
+    }
+
+    [Fact]
+    public async Task Loader_resolves_every_configured_path_from_ledger_root()
+    {
+        var directory = Directory.CreateTempSubdirectory("dawatcha-root-");
+        try
+        {
+            var cancellationToken = TestContext.Current.CancellationToken;
+            var path = Path.Combine(directory.FullName, "watch-config.json");
+            var config = CreateLedgerConfiguration();
+            config.Settings.GeckoDriverPath = @".\tools\geckodriver.exe";
+            config.Settings.DeliveryStatePath = @".\state\delivery.json";
+            config.Jobs[0].Participants[0].Process.ExecutablePath =
+                @".\apps\trainer.exe";
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(config,
+                ConfigurationJson.CreateOptions()), cancellationToken);
+
+            using var service = new WatchConfigurationService(path);
+            var loaded = await service.LoadAsync(cancellationToken);
+
+            Assert.Equal(Path.Combine(directory.FullName, "tools",
+                    "geckodriver.exe"),
+                loaded.Settings.GeckoDriverPath);
+            Assert.Equal(Path.Combine(directory.FullName, "state",
+                    "delivery.json"),
+                loaded.Settings.DeliveryStatePath);
+            Assert.Equal(Path.Combine(directory.FullName, "apps", "trainer.exe"),
+                loaded.Jobs[0].Participants[0].Process.ExecutablePath);
+        }
+        finally
+        {
+            directory.Delete(true);
+        }
+    }
+
+    [Theory]
+    [InlineData(@"C:\outside\geckodriver.exe")]
+    [InlineData(@".\..\geckodriver.exe")]
+    [InlineData(@"tools\geckodriver.exe")]
+    [InlineData(@".\gecko*.exe")]
+    public async Task Loader_rejects_paths_not_rooted_safely(string driverPath)
+    {
+        var directory = Directory.CreateTempSubdirectory("dawatcha-root-");
+        try
+        {
+            var cancellationToken = TestContext.Current.CancellationToken;
+            var path = Path.Combine(directory.FullName, "watch-config.json");
+            var config = CreateLedgerConfiguration();
+            config.Settings.GeckoDriverPath = driverPath;
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(config,
+                ConfigurationJson.CreateOptions()), cancellationToken);
+
+            using var service = new WatchConfigurationService(path);
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                service.LoadAsync(cancellationToken));
         }
         finally
         {
@@ -550,8 +611,8 @@ public sealed class CoreBehaviorTests
     {
         var schemaText = File.ReadAllText(
             FindRepositoryFile(@"docs\watch-config.schema.json"));
-        var exampleText = File.ReadAllText(
-            FindRepositoryFile("watch-config.example.json"));
+        var examplePath = FindRepositoryFile("watch-config.example.json");
+        var exampleText = File.ReadAllText(examplePath);
         var schema = JsonSchema.FromText(schemaText);
         using var instance = JsonDocument.Parse(exampleText);
         var result = schema.Evaluate(instance.RootElement);
@@ -560,10 +621,9 @@ public sealed class CoreBehaviorTests
         var config = JsonSerializer.Deserialize<WatchConfiguration>(
             exampleText, ConfigurationJson.CreateOptions());
         Assert.NotNull(config);
+        ConfigurationPathResolver.ResolveRelativePaths(config, examplePath);
         var errors = ConfigurationValidator.Validate(config);
-        Assert.DoesNotContain(errors, error =>
-            !error.Contains("firefoxBinary does not exist",
-                StringComparison.OrdinalIgnoreCase));
+        Assert.Empty(errors);
     }
 
     private static WatchConfiguration CreateConfiguration() => new()
@@ -581,11 +641,20 @@ public sealed class CoreBehaviorTests
         ConversationIdleTimeoutMs = 10_000,
         SendVerificationTimeoutMs = 5_000,
         AutomaticSendAttempts = 3,
-        FirefoxBinary = @"C:\Program Files\Mozilla Firefox\firefox.exe",
-        FirefoxProfileDirectory = @"C:\CinDa-Test\FirefoxProfile",
         GeckoDriverPath = @"C:\CinDa-Test\geckodriver.exe",
         DeliveryStatePath = @"C:\CinDa-Test\delivery-state.json"
     };
+
+    private static WatchConfiguration CreateLedgerConfiguration()
+    {
+        var configuration = CreateConfiguration();
+        configuration.Settings.GeckoDriverPath = @".\geckodriver.exe";
+        configuration.Settings.DeliveryStatePath = @".\delivery-state.json";
+        foreach (var participant in configuration.Jobs.SelectMany(
+                     job => job.Participants))
+            participant.Process.ExecutablePath = @".\trainer.exe";
+        return configuration;
+    }
 
     private static TrainingJob CreateJob(bool twoParticipants = false)
     {

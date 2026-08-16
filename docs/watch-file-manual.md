@@ -28,6 +28,8 @@ The document MUST:
 - Use the documented camelCase spelling; names are case-sensitive.
 - Contain no comments, trailing commas, duplicate names, or unknown properties.
 - Double backslashes in Windows paths.
+- Express every file path from the ledger root as `.\\required-item`; absolute
+  paths and `..` parent-directory escapes are forbidden.
 - Use canonical hyphenated UUIDs and UTC timestamps ending in `Z`.
 
 CinDa-DaWatcha strictly validates every reload. A rejected edit is displayed and
@@ -63,10 +65,12 @@ Every setting is required.
 | `conversationIdleTimeoutMs` | 10000–3600000 | 900000 |
 | `sendVerificationTimeoutMs` | 5000–300000 | 45000 |
 | `automaticSendAttempts` | 1–5 | 3 |
-| `firefoxBinary` | Existing absolute path ending `firefox.exe` | Standard Firefox path |
-| `firefoxProfileDirectory` | Dedicated absolute directory, not the user-profile root | App-local profile |
-| `geckoDriverPath` | Absolute path ending `geckodriver.exe` | Beside packaged app |
-| `deliveryStatePath` | Absolute file path | App-local delivery ledger |
+| `geckoDriverPath` | Ledger-root-relative path ending `geckodriver.exe` | `.\geckodriver.exe` |
+| `deliveryStatePath` | Ledger-root-relative file path | `.\delivery-state.json` |
+
+Firefox is discovered from its normal Windows installation and is not configured
+in the ledger. CinDa-DaWatcha launches a visible, non-private Firefox window and
+does not pass private-window, `-no-remote`, or custom-profile switches.
 
 `automaticSendAttempts` is the number of ordinary attempts. After those fail,
 the program refreshes the same conversation once and performs one final automatic
@@ -135,15 +139,16 @@ initiating UUID to unstick the application without launching a duplicate run.
 {
   "pid": 12345,
   "name": "trainer.exe",
-  "executablePath": "C:\\Apps\\Trainer\\trainer.exe",
+  "executablePath": ".\\Apps\\Trainer\\trainer.exe",
   "startTimeUtc": "2026-08-15T18:42:12Z"
 }
 ```
 
 Capture these values from the same live process. PID alone is never trusted,
-because Windows reuses PIDs. Name matching ignores the optional `.exe` suffix;
-paths are compared as absolute Windows paths; start times have a one-second
-precision tolerance.
+because Windows reuses PIDs. Name matching ignores the optional `.exe` suffix.
+Each configured path is resolved from the directory containing the selected
+`watch-config.json`, then the resolved Windows paths are compared. Start times
+have a one-second precision tolerance.
 
 Process inspection is performed in-process with .NET/Windows APIs. The runtime
 does not invoke PowerShell, `tasklist`, WMI command-line tools, or any other CLI.
@@ -177,7 +182,7 @@ For every warning and final handoff, CinDa-DaWatcha:
 
 1. Creates a deterministic delivery ID and saves the complete message plus SHA-256
    in the private delivery ledger.
-2. Navigates the one managed Firefox tab to the exact initiating UUID.
+2. Navigates the controlled Firefox tab to the exact initiating UUID.
 3. Rejects redirects away from `https://chatgpt.com/c/{uuid}`.
 4. Searches user-authored bubbles for the complete normalized message. If found,
    it records success without clicking Send.
@@ -210,8 +215,9 @@ Before enabling a new job, verify all of the following:
 - Every timestamp is UTC and ends in `Z`.
 - Pending/running participants have fresh heartbeats.
 - The file passes the schema and contains no unknown or duplicate fields.
-- The Firefox, profile, driver, and delivery-state paths are absolute.
-- The dedicated Firefox profile is signed into ChatGPT.
+- Every configured file path starts with `.\\` and remains inside the ledger
+  directory.
+- The standard Firefox window opened by the dashboard is signed into ChatGPT.
 
 For a terminal update, verify:
 
@@ -230,7 +236,7 @@ For a terminal update, verify:
   "process": {
     "pid": 12345,
     "name": "trainer.exe",
-    "executablePath": "C:\\Apps\\Trainer\\trainer.exe",
+    "executablePath": ".\\Apps\\Trainer\\trainer.exe",
     "startTimeUtc": "2026-08-15T18:42:12Z"
   },
   "state": "Succeeded",

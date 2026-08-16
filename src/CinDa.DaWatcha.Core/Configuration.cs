@@ -35,24 +35,10 @@ public sealed class AppSettings
     public int AutomaticSendAttempts { get; set; } = 3;
 
     [JsonRequired]
-    public string FirefoxBinary { get; set; } =
-        @"C:\Program Files\Mozilla Firefox\firefox.exe";
+    public string GeckoDriverPath { get; set; } = @".\geckodriver.exe";
 
     [JsonRequired]
-    public string FirefoxProfileDirectory { get; set; } =
-        Path.Combine(Environment.GetFolderPath(
-            Environment.SpecialFolder.LocalApplicationData),
-            "CinDa-DaWatcha", "FirefoxProfile");
-
-    [JsonRequired]
-    public string GeckoDriverPath { get; set; } =
-        Path.Combine(AppContext.BaseDirectory, "geckodriver.exe");
-
-    [JsonRequired]
-    public string DeliveryStatePath { get; set; } =
-        Path.Combine(Environment.GetFolderPath(
-            Environment.SpecialFolder.LocalApplicationData),
-            "CinDa-DaWatcha", "delivery-state.json");
+    public string DeliveryStatePath { get; set; } = @".\delivery-state.json";
 }
 
 public sealed class TrainingJob

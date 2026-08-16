@@ -135,6 +135,7 @@ public sealed class WatchConfigurationService : IDisposable
         StrictJson.RejectDuplicateProperties(bytes);
         var config = JsonSerializer.Deserialize<WatchConfiguration>(bytes, _json)
             ?? throw new InvalidDataException("Configuration is empty.");
+        ConfigurationPathResolver.ResolveRelativePaths(config, _path);
         var errors = ConfigurationValidator.Validate(config);
         if (errors.Count > 0)
             throw new InvalidDataException(string.Join(Environment.NewLine, errors));

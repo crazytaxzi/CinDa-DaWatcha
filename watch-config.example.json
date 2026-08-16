@@ -7,10 +7,8 @@
     "conversationIdleTimeoutMs": 900000,
     "sendVerificationTimeoutMs": 45000,
     "automaticSendAttempts": 3,
-    "firefoxBinary": "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
-    "firefoxProfileDirectory": "C:\\Users\\YOUR_USER\\AppData\\Local\\CinDa-DaWatcha\\FirefoxProfile",
-    "geckoDriverPath": "C:\\Program Files\\CinDa-DaWatcha\\geckodriver.exe",
-    "deliveryStatePath": "C:\\Users\\YOUR_USER\\AppData\\Local\\CinDa-DaWatcha\\delivery-state.json"
+    "geckoDriverPath": ".\\geckodriver.exe",
+    "deliveryStatePath": ".\\delivery-state.json"
   },
   "jobs": [
     {
@@ -27,7 +25,7 @@
           "process": {
             "pid": 12345,
             "name": "trainer.exe",
-            "executablePath": "C:\\Apps\\Trainer\\trainer.exe",
+            "executablePath": ".\\Apps\\Trainer\\trainer.exe",
             "startTimeUtc": "2026-08-15T18:42:12Z"
           },
           "state": "Pending",

@@ -142,31 +142,12 @@ public static class ConfigurationValidator
         if (settings.AutomaticSendAttempts is < 1 or > 5)
             errors.Add("settings.automaticSendAttempts must be from 1 through 5.");
 
-        ValidateAbsoluteFile(settings.FirefoxBinary,
-            "settings.firefoxBinary", "firefox.exe", errors);
         ValidateAbsoluteFile(settings.GeckoDriverPath,
             "settings.geckoDriverPath", "geckodriver.exe", errors,
             requireExists: false);
-        ValidateAbsoluteDirectory(settings.FirefoxProfileDirectory,
-            "settings.firefoxProfileDirectory", errors);
         ValidateAbsoluteFile(settings.DeliveryStatePath,
             "settings.deliveryStatePath", null, errors,
             requireExists: false);
-
-        if (PathsEqual(settings.FirefoxProfileDirectory,
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)))
-            errors.Add("settings.firefoxProfileDirectory cannot be the user profile root.");
-        try
-        {
-            if (PathsEqual(settings.FirefoxProfileDirectory,
-                    Path.GetPathRoot(settings.FirefoxProfileDirectory) ?? ""))
-                errors.Add("settings.firefoxProfileDirectory cannot be a drive root.");
-        }
-        catch (Exception exception) when (exception is ArgumentException or
-                   NotSupportedException or PathTooLongException)
-        {
-            errors.Add("settings.firefoxProfileDirectory is not a valid path.");
-        }
     }
 
     private static void ValidateProcess(
@@ -200,13 +181,6 @@ public static class ConfigurationValidator
             errors.Add($"{field} must use UTC with a Z suffix.");
     }
 
-    private static void ValidateAbsoluteDirectory(
-        string value, string field, List<string> errors)
-    {
-        if (string.IsNullOrWhiteSpace(value) || !Path.IsPathFullyQualified(value))
-            errors.Add($"{field} must be an absolute path.");
-    }
-
     private static void ValidateAbsoluteFile(
         string value, string field, string? expectedName,
         List<string> errors, bool requireExists = true)
@@ -223,20 +197,4 @@ public static class ConfigurationValidator
             errors.Add($"{field} does not exist: {value}");
     }
 
-    private static bool PathsEqual(string left, string right)
-    {
-        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
-            return false;
-        try
-        {
-            return Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar).Equals(
-                Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar),
-                StringComparison.OrdinalIgnoreCase);
-        }
-        catch (Exception exception) when (exception is ArgumentException or
-                   NotSupportedException or PathTooLongException)
-        {
-            return false;
-        }
-    }
 }

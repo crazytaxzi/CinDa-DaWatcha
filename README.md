@@ -6,9 +6,9 @@ has finished and released its process, CinDa-DaWatcha delivers one verified
 summary to the ChatGPT conversation that started the job.
 
 The runtime uses local Windows process inspection and browser DOM automation in
-an isolated Firefox profile. It does not call the OpenAI API, any other web API,
-email, webhooks, or command-line tools. Network interaction is limited to what
-the managed Firefox browser itself does while displaying ChatGPT.
+a normal, visible Firefox window. It does not call the OpenAI API, any other web
+API, email, webhooks, or command-line tools. Network interaction is limited to
+what Firefox itself does while displaying ChatGPT.
 
 ## Delivery contract
 
@@ -41,15 +41,19 @@ dotnet build .\CinDa-DaWatcha.sln -c Release
 dotnet run --project .\src\CinDa.DaWatcha.App -c Release
 ```
 
-At first launch, the program creates:
+At first launch, the program creates this ledger beside the executable:
 
 ```text
-%USERPROFILE%\Documents\CinDa-DaWatcha\watch-config.json
+.\watch-config.json
 ```
 
-Open the dedicated Firefox window from the dashboard and sign in to ChatGPT.
-The profile and tab are owned only by CinDa-DaWatcha; normal Firefox sessions
-are not attached to or altered.
+All paths in that ledger are relative to the ledger's own directory. Keep the
+packaged `geckodriver.exe` beside it and use paths such as
+`.\Apps\Trainer\trainer.exe` for watched programs. Absolute paths and `..`
+escapes are rejected, so the directory can be moved as one unit.
+
+Open Firefox from the dashboard and sign in to ChatGPT. The app launches an
+ordinary non-private window; it does not attach to or alter already-open tabs.
 
 Copy [watch-config.example.json](watch-config.example.json), then follow the
 normative [job-ledger manual](docs/watch-file-manual.md) and

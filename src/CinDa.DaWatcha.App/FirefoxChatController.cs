@@ -329,23 +329,15 @@ public sealed class FirefoxChatController : IChatBrowserDelivery, IDisposable
         }
 
         var settings = _settings();
-        if (!File.Exists(settings.FirefoxBinary))
-            throw new FileNotFoundException(
-                "Configured Firefox executable was not found.",
-                settings.FirefoxBinary);
         if (!File.Exists(settings.GeckoDriverPath))
             throw new FileNotFoundException(
                 "Bundled GeckoDriver was not found. CinDa-DaWatcha will not " +
                 "download a driver at runtime.", settings.GeckoDriverPath);
 
-        Directory.CreateDirectory(settings.FirefoxProfileDirectory);
-        var options = new FirefoxOptions
-        {
-            BinaryLocation = settings.FirefoxBinary
-        };
-        options.AddArgument("-no-remote");
-        options.AddArgument("-profile");
-        options.AddArgument(settings.FirefoxProfileDirectory);
+        // GeckoDriver discovers the installed Firefox. Do not pass private,
+        // no-remote, or custom-profile switches: this must be an ordinary
+        // visible Firefox window.
+        var options = new FirefoxOptions();
 
         var driverDirectory = Path.GetDirectoryName(settings.GeckoDriverPath)!;
         var driverFile = Path.GetFileName(settings.GeckoDriverPath);
@@ -391,7 +383,7 @@ public sealed class FirefoxChatController : IChatBrowserDelivery, IDisposable
         {
             throw new BrowserLoginRequiredException(
                 $"ChatGPT composer is unavailable at {driver.Url}. " +
-                "Complete sign-in in the managed Firefox window.");
+                "Complete sign-in in the Firefox window.");
         }
     }
 

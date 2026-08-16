@@ -28,9 +28,9 @@
       "minLength": 1,
       "pattern": "\\S"
     },
-    "absoluteWindowsPath": {
+    "ledgerRelativeWindowsPath": {
       "type": "string",
-      "pattern": "^[A-Za-z]:\\\\"
+      "pattern": "^\\.\\\\(?!.*(?:^|\\\\)\\.\\.(?:\\\\|$))(?!.*:)(?!.*[\"<>|?*]).+$"
     },
     "settings": {
       "type": "object",
@@ -43,8 +43,6 @@
         "conversationIdleTimeoutMs",
         "sendVerificationTimeoutMs",
         "automaticSendAttempts",
-        "firefoxBinary",
-        "firefoxProfileDirectory",
         "geckoDriverPath",
         "deliveryStatePath"
       ],
@@ -56,20 +54,13 @@
         "conversationIdleTimeoutMs": { "type": "integer", "minimum": 10000, "maximum": 3600000 },
         "sendVerificationTimeoutMs": { "type": "integer", "minimum": 5000, "maximum": 300000 },
         "automaticSendAttempts": { "type": "integer", "minimum": 1, "maximum": 5 },
-        "firefoxBinary": {
-          "allOf": [
-            { "$ref": "#/$defs/absoluteWindowsPath" },
-            { "pattern": "(?i:firefox\\.exe)$" }
-          ]
-        },
-        "firefoxProfileDirectory": { "$ref": "#/$defs/absoluteWindowsPath" },
         "geckoDriverPath": {
           "allOf": [
-            { "$ref": "#/$defs/absoluteWindowsPath" },
+            { "$ref": "#/$defs/ledgerRelativeWindowsPath" },
             { "pattern": "(?i:geckodriver\\.exe)$" }
           ]
         },
-        "deliveryStatePath": { "$ref": "#/$defs/absoluteWindowsPath" }
+        "deliveryStatePath": { "$ref": "#/$defs/ledgerRelativeWindowsPath" }
       }
     },
     "job": {
@@ -168,7 +159,7 @@
       "properties": {
         "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
         "name": { "$ref": "#/$defs/nonBlank" },
-        "executablePath": { "$ref": "#/$defs/absoluteWindowsPath" },
+        "executablePath": { "$ref": "#/$defs/ledgerRelativeWindowsPath" },
         "startTimeUtc": { "$ref": "#/$defs/utc" }
       }
     }

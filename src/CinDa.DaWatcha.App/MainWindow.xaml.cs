@@ -43,9 +43,7 @@ public partial class MainWindow : Window
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        var path = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "CinDa-DaWatcha", "watch-config.json");
+        var path = Path.Combine(AppContext.BaseDirectory, "watch-config.json");
         ConfigPathBox.Text = path;
         try
         {
@@ -542,11 +540,11 @@ public partial class MainWindow : Window
         try
         {
             await _browser.OpenHomeForLoginAsync(_runCancellation.Token);
-            SetStatus("Managed Firefox opened. Complete ChatGPT sign-in if needed.");
+            SetStatus("Firefox opened. Complete ChatGPT sign-in if needed.");
         }
         catch (Exception exception)
         {
-            ShowError("Could not open managed Firefox", exception);
+            ShowError("Could not open Firefox", exception);
         }
     }
 

@@ -15,8 +15,6 @@ if (!File.Exists(driverPath))
         "Pass the local GeckoDriver path with --driver. The smoke test will " +
         "not download it.", driverPath);
 
-var profile = Path.Combine(
-    Path.GetTempPath(), "CinDa-DaWatcha-BrowserSmoke-" + Guid.NewGuid());
 var normalUuid = "11111111-2222-3333-4444-555555555555";
 var draftUuid = "22222222-3333-4444-5555-666666666666";
 var redirectUuid = "33333333-4444-5555-6666-777777777777";
@@ -32,10 +30,9 @@ var settings = new AppSettings
     ConversationIdleTimeoutMs = 10_000,
     SendVerificationTimeoutMs = 5_000,
     AutomaticSendAttempts = 2,
-    FirefoxBinary = @"C:\Program Files\Mozilla Firefox\firefox.exe",
-    FirefoxProfileDirectory = profile,
     GeckoDriverPath = Path.GetFullPath(driverPath),
-    DeliveryStatePath = Path.Combine(profile, "delivery-state.json")
+    DeliveryStatePath = Path.Combine(
+        Path.GetTempPath(), "CinDa-DaWatcha-BrowserSmoke-delivery-state.json")
 };
 var deliveryId = HandoffIdentity.Create("browser-smoke|final");
 var message = "CinDa-DaWatcha browser verification\n" +
@@ -43,64 +40,49 @@ var message = "CinDa-DaWatcha browser verification\n" +
     "Unicode: training complete - alpha Ω\n\n" +
     $"CinDa-DaWatcha-ID: {deliveryId}";
 
-try
-{
-    Console.WriteLine($"Firefox: {settings.FirefoxBinary}");
-    Console.WriteLine($"GeckoDriver: {settings.GeckoDriverPath}");
-    using var browser = new FirefoxChatController(
-        () => settings, fixture.Origin);
-    var coordinator = new HandoffDeliveryCoordinator(browser, () => settings);
+Console.WriteLine("Firefox: standard installed browser window");
+Console.WriteLine($"GeckoDriver: {settings.GeckoDriverPath}");
+using var browser = new FirefoxChatController(
+    () => settings, fixture.Origin);
+var coordinator = new HandoffDeliveryCoordinator(browser, () => settings);
 
-    await browser.NavigateToConversationAsync(normalUuid);
-    Assert(!await browser.MessageExistsAsync(normalUuid, message),
-        "A marker-only bubble must not count as complete delivery.");
+await browser.NavigateToConversationAsync(normalUuid);
+Assert(!await browser.MessageExistsAsync(normalUuid, message),
+    "A marker-only bubble must not count as complete delivery.");
 
-    var stopwatch = Stopwatch.StartNew();
-    var outgoing = new OutgoingMessage(
-        deliveryId, "browser-smoke", normalUuid,
-        OutgoingMessageKind.FinalHandoff, message, DateTimeOffset.UtcNow);
-    var outcome = await coordinator.DeliverAutomaticallyAsync(outgoing);
-    stopwatch.Stop();
-    Assert(outcome.Delivered, "Automatic browser delivery was not verified.");
-    Assert(stopwatch.Elapsed >= TimeSpan.FromSeconds(1),
-        "Delivery did not wait for the simulated generating state to stop.");
-    await WaitUntilAsync(() => fixture.SendCount == 1, TimeSpan.FromSeconds(2));
-    Assert(fixture.SendCount == 1,
-        $"Expected exactly one Send click, observed {fixture.SendCount}.");
-    Assert(await browser.MessageExistsAsync(normalUuid, message),
-        "The complete user bubble was not found after Send.");
-    await browser.PrepareMessageAsync(normalUuid, message);
-    await browser.SendPreparedMessageAsync(normalUuid, message);
-    await Task.Delay(100);
-    Assert(fixture.SendCount == 1,
-        "An already delivered message was sent a second time.");
-    Console.WriteLine("PASS: waited for idle, clicked Send once, and verified " +
-        "the complete user bubble without a duplicate re-send.");
+var stopwatch = Stopwatch.StartNew();
+var outgoing = new OutgoingMessage(
+    deliveryId, "browser-smoke", normalUuid,
+    OutgoingMessageKind.FinalHandoff, message, DateTimeOffset.UtcNow);
+var outcome = await coordinator.DeliverAutomaticallyAsync(outgoing);
+stopwatch.Stop();
+Assert(outcome.Delivered, "Automatic browser delivery was not verified.");
+Assert(stopwatch.Elapsed >= TimeSpan.FromSeconds(1),
+    "Delivery did not wait for the simulated generating state to stop.");
+await WaitUntilAsync(() => fixture.SendCount == 1, TimeSpan.FromSeconds(2));
+Assert(fixture.SendCount == 1,
+    $"Expected exactly one Send click, observed {fixture.SendCount}.");
+Assert(await browser.MessageExistsAsync(normalUuid, message),
+    "The complete user bubble was not found after Send.");
+await browser.PrepareMessageAsync(normalUuid, message);
+await browser.SendPreparedMessageAsync(normalUuid, message);
+await Task.Delay(100);
+Assert(fixture.SendCount == 1,
+    "An already delivered message was sent a second time.");
+Console.WriteLine("PASS: waited for idle, clicked Send once, and verified " +
+    "the complete user bubble without a duplicate re-send.");
 
-    await browser.NavigateToConversationAsync(draftUuid);
-    await AssertThrowsAsync<InvalidOperationException>(() =>
-        browser.PrepareMessageAsync(draftUuid, message));
-    Assert(fixture.SendCount == 1,
-        "The unrelated draft path unexpectedly clicked Send.");
-    Console.WriteLine("PASS: unrelated composer draft was preserved and blocked.");
+await browser.NavigateToConversationAsync(draftUuid);
+await AssertThrowsAsync<InvalidOperationException>(() =>
+    browser.PrepareMessageAsync(draftUuid, message));
+Assert(fixture.SendCount == 1,
+    "The unrelated draft path unexpectedly clicked Send.");
+Console.WriteLine("PASS: unrelated composer draft was preserved and blocked.");
 
-    await AssertThrowsAsync<InvalidOperationException>(() =>
-        browser.NavigateToConversationAsync(redirectUuid));
-    Console.WriteLine("PASS: redirect away from the exact UUID was rejected.");
-    Console.WriteLine("BROWSER SMOKE PASS");
-}
-finally
-{
-    try
-    {
-        if (Directory.Exists(profile))
-            Directory.Delete(profile, true);
-    }
-    catch
-    {
-        // Firefox can briefly retain a profile lock after shutdown.
-    }
-}
+await AssertThrowsAsync<InvalidOperationException>(() =>
+    browser.NavigateToConversationAsync(redirectUuid));
+Console.WriteLine("PASS: redirect away from the exact UUID was rejected.");
+Console.WriteLine("BROWSER SMOKE PASS");
 
 return;
 
