@@ -1,242 +1,175 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/crazytaxzi/CinDa-DaWatcha/blob/main/docs/watch-config.schema.json",
-  "title": "CinDa-DaWatcha watched file",
-  "description": "Strict schema for the JSON control file consumed by CinDa-DaWatcha.",
+  "title": "CinDa-DaWatcha job ledger",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "settings",
-    "watches"
-  ],
+  "required": ["settings", "jobs"],
   "properties": {
-    "settings": {
-      "$ref": "#/$defs/settings"
-    },
-    "watches": {
+    "settings": { "$ref": "#/$defs/settings" },
+    "jobs": {
       "type": "array",
-      "items": {
-        "$ref": "#/$defs/watch"
-      }
+      "items": { "$ref": "#/$defs/job" }
     }
   },
   "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "not": { "const": "00000000-0000-0000-0000-000000000000" }
+    },
+    "utc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "nonBlank": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "absoluteWindowsPath": {
+      "type": "string",
+      "pattern": "^[A-Za-z]:\\\\"
+    },
     "settings": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "chatBaseUrl",
-        "conversationLimitBytes",
         "pollIntervalMs",
-        "completionStablePolls",
-        "handoffRetries",
-        "batchWindowMs",
+        "heartbeatStaleMs",
+        "conversationIdlePollMs",
+        "conversationIdleStablePolls",
+        "conversationIdleTimeoutMs",
+        "sendVerificationTimeoutMs",
+        "automaticSendAttempts",
         "firefoxBinary",
-        "firefoxProfileDirectory"
+        "firefoxProfileDirectory",
+        "geckoDriverPath",
+        "deliveryStatePath"
       ],
       "properties": {
-        "chatBaseUrl": {
-          "type": "string",
-          "const": "https://chatgpt.com",
-          "description": "Trusted ChatGPT origin. Paths, queries, and fragments are forbidden."
-        },
-        "conversationLimitBytes": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 5242880,
-          "description": "Rollover threshold for visible conversation text encoded as UTF-8."
-        },
-        "pollIntervalMs": {
-          "type": "integer",
-          "minimum": 250,
-          "default": 1000,
-          "description": "Delay between process and completion checks."
-        },
-        "completionStablePolls": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 2,
-          "description": "Consecutive positive polls required before a visual completion trigger."
-        },
-        "handoffRetries": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 2,
-          "description": "Total normal handoff attempt count, including the first attempt."
-        },
-        "batchWindowMs": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 3000,
-          "description": "Time window used to collect events before grouping them by UUID."
-        },
+        "pollIntervalMs": { "type": "integer", "minimum": 250, "maximum": 60000 },
+        "heartbeatStaleMs": { "type": "integer", "minimum": 1000, "maximum": 86400000 },
+        "conversationIdlePollMs": { "type": "integer", "minimum": 250, "maximum": 10000 },
+        "conversationIdleStablePolls": { "type": "integer", "minimum": 2, "maximum": 30 },
+        "conversationIdleTimeoutMs": { "type": "integer", "minimum": 10000, "maximum": 3600000 },
+        "sendVerificationTimeoutMs": { "type": "integer", "minimum": 5000, "maximum": 300000 },
+        "automaticSendAttempts": { "type": "integer", "minimum": 1, "maximum": 5 },
         "firefoxBinary": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Absolute path to firefox.exe."
+          "allOf": [
+            { "$ref": "#/$defs/absoluteWindowsPath" },
+            { "pattern": "(?i:firefox\\.exe)$" }
+          ]
         },
-        "firefoxProfileDirectory": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Absolute path to a profile directory dedicated to CinDa-DaWatcha."
-        }
+        "firefoxProfileDirectory": { "$ref": "#/$defs/absoluteWindowsPath" },
+        "geckoDriverPath": {
+          "allOf": [
+            { "$ref": "#/$defs/absoluteWindowsPath" },
+            { "pattern": "(?i:geckodriver\\.exe)$" }
+          ]
+        },
+        "deliveryStatePath": { "$ref": "#/$defs/absoluteWindowsPath" }
       }
     },
-    "watch": {
+    "job": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "id",
         "enabled",
-        "process",
-        "completion",
-        "chat",
-        "passalongMessage"
+        "initiatingChatUuid",
+        "createdAtUtc",
+        "updatedAtUtc",
+        "summary",
+        "participants"
       ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S",
-          "description": "Stable, case-insensitively unique logical watch identifier."
-        },
-        "enabled": {
-          "type": "boolean"
-        },
-        "process": {
-          "$ref": "#/$defs/process"
-        },
-        "completion": {
-          "$ref": "#/$defs/completion"
-        },
-        "chat": {
-          "$ref": "#/$defs/chat"
-        },
-        "passalongMessage": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S",
-          "description": "Literal, non-secret instruction included in the process handoff."
-        }
-      }
-    },
-    "process": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "pid",
-        "name",
-        "executablePath",
-        "startTimeUtc"
-      ],
-      "properties": {
-        "pid": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 2147483647
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
-        },
-        "executablePath": {
-          "type": "string",
-          "minLength": 3,
-          "description": "Absolute Windows executable path captured from the live PID."
-        },
-        "startTimeUtc": {
-          "type": "string",
-          "format": "date-time",
-          "pattern": "Z$",
-          "description": "UTC process start timestamp captured from the live PID."
-        }
-      }
-    },
-    "completion": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "method",
-        "patterns",
-        "windowTitlePattern"
-      ],
-      "properties": {
-        "method": {
-          "type": "string",
-          "enum": [
-            "uia-text",
-            "title"
+        "id": { "$ref": "#/$defs/nonBlank" },
+        "enabled": { "type": "boolean" },
+        "initiatingChatUuid": { "$ref": "#/$defs/uuid" },
+        "recoveryChatUuid": {
+          "oneOf": [
+            { "$ref": "#/$defs/uuid" },
+            { "type": "null" }
           ]
         },
-        "patterns": {
+        "createdAtUtc": { "$ref": "#/$defs/utc" },
+        "updatedAtUtc": { "$ref": "#/$defs/utc" },
+        "summary": { "type": "string" },
+        "participants": {
           "type": "array",
-          "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "\\S"
-          }
-        },
-        "windowTitlePattern": {
-          "type": "string"
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/participant" }
         }
+      }
+    },
+    "participant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "process",
+        "state",
+        "updatedAtUtc",
+        "detail",
+        "handoffMessage"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonBlank" },
+        "process": { "$ref": "#/$defs/process" },
+        "state": {
+          "type": "string",
+          "enum": ["Pending", "Running", "Blocked", "Succeeded", "Failed"]
+        },
+        "updatedAtUtc": { "$ref": "#/$defs/utc" },
+        "heartbeatUtc": {
+          "oneOf": [
+            { "$ref": "#/$defs/utc" },
+            { "type": "null" }
+          ]
+        },
+        "finishedAtUtc": {
+          "oneOf": [
+            { "$ref": "#/$defs/utc" },
+            { "type": "null" }
+          ]
+        },
+        "exitCode": {
+          "type": ["integer", "null"]
+        },
+        "detail": { "type": "string" },
+        "handoffMessage": { "type": "string" }
       },
       "allOf": [
         {
-          "if": {
-            "properties": {
-              "method": {
-                "const": "uia-text"
-              }
-            },
-            "required": [
-              "method"
-            ]
-          },
+          "if": { "properties": { "state": { "enum": ["Pending", "Running"] } } },
           "then": {
-            "properties": {
-              "patterns": {
-                "minItems": 1
-              }
-            }
+            "required": ["heartbeatUtc"],
+            "properties": { "heartbeatUtc": { "$ref": "#/$defs/utc" } }
           }
         },
         {
-          "if": {
-            "properties": {
-              "method": {
-                "const": "title"
-              }
-            },
-            "required": [
-              "method"
-            ]
-          },
+          "if": { "properties": { "state": { "enum": ["Succeeded", "Failed"] } } },
           "then": {
+            "required": ["finishedAtUtc"],
             "properties": {
-              "windowTitlePattern": {
-                "minLength": 1,
-                "pattern": "\\S"
-              }
+              "finishedAtUtc": { "$ref": "#/$defs/utc" },
+              "handoffMessage": { "$ref": "#/$defs/nonBlank" }
             }
           }
         }
       ]
     },
-    "chat": {
+    "process": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "uuid"
-      ],
+      "required": ["pid", "name", "executablePath", "startTimeUtc"],
       "properties": {
-        "uuid": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$",
-          "description": "UUID copied from the intended ChatGPT /c/{uuid} URL."
-        }
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "name": { "$ref": "#/$defs/nonBlank" },
+        "executablePath": { "$ref": "#/$defs/absoluteWindowsPath" },
+        "startTimeUtc": { "$ref": "#/$defs/utc" }
       }
     }
   }

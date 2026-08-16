@@ -1,80 +1,72 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace CinDa.DaWatcha.Core;
-
-public enum WatchTriggerKind
-{
-    Completion,
-    Exit
-}
-
-public sealed record WatchEvent(
-    WatchItem Watch,
-    WatchTriggerKind Trigger,
-    DateTimeOffset OccurredAt,
-    string Detail);
-
-public sealed record WatchStatus(
-    string WatchId,
-    int Pid,
-    string State,
-    string Detail,
-    DateTimeOffset UpdatedAt);
 
 public sealed record ProcessInspection(
     bool IsAlive,
     bool FingerprintMatches,
-    string Detail);
+    bool? IsResponding,
+    string Detail,
+    bool IdentityIndeterminate = false);
 
-public interface ICompletionDetector
+public interface IProcessInspector
 {
-    Task<bool> IsCompleteAsync(
-        WatchItem watch, CancellationToken cancellationToken);
+    ProcessInspection Inspect(ProcessFingerprint expected);
 }
 
-public static class ProcessIdentityVerifier
+public sealed class SystemProcessInspector : IProcessInspector
 {
-    public static ProcessInspection Inspect(ProcessFingerprint expected)
+    public ProcessInspection Inspect(ProcessFingerprint expected)
     {
         try
         {
             using var process = Process.GetProcessById(expected.Pid);
             if (process.HasExited)
-                return new(false, false, "Process exited.");
+                return new(false, false, null, "Process exited.");
 
             var actualName = NormalizeName(process.ProcessName);
             var expectedName = NormalizeName(expected.Name);
             if (!actualName.Equals(expectedName,
                     StringComparison.OrdinalIgnoreCase))
-                return new(true, false,
+                return new(true, false, null,
                     $"PID belongs to {process.ProcessName}, not {expected.Name}.");
 
             var actualPath = process.MainModule?.FileName;
             if (string.IsNullOrWhiteSpace(actualPath))
-                return new(true, false, "Executable path is unavailable.");
+                return new(true, false, null, "Executable path is unavailable.",
+                    true);
             if (!Path.GetFullPath(actualPath).Equals(
                     Path.GetFullPath(expected.ExecutablePath),
                     StringComparison.OrdinalIgnoreCase))
-                return new(true, false, "Executable path does not match.");
+                return new(true, false, null, "Executable path does not match.");
 
             var actualStart = process.StartTime.ToUniversalTime();
             var delta = (actualStart - expected.StartTimeUtc.UtcDateTime).Duration();
-            if (delta > TimeSpan.FromSeconds(2))
-                return new(true, false, "Process start time does not match.");
+            if (delta > TimeSpan.FromSeconds(1))
+                return new(true, false, null, "Process start time does not match.");
 
-            return new(true, true, "Fingerprint verified.");
+            bool? responding = null;
+            if (process.MainWindowHandle != nint.Zero)
+            {
+                try { responding = process.Responding; }
+                catch (InvalidOperationException) { }
+            }
+            return new(true, true, responding, "Fingerprint verified.");
         }
         catch (ArgumentException)
         {
-            return new(false, false, "PID is not running.");
+            return new(false, false, null, "PID is not running.");
         }
         catch (InvalidOperationException)
         {
-            return new(false, false, "Process exited during inspection.");
+            return new(false, false, null, "Process exited during inspection.");
         }
         catch (Exception exception)
         {
-            return new(true, false, $"Identity check failed: {exception.Message}");
+            return new(true, false, null,
+                $"Identity check failed: {exception.Message}", true);
         }
     }
 
@@ -82,25 +74,242 @@ public static class ProcessIdentityVerifier
         Path.GetFileNameWithoutExtension(name.Trim());
 }
 
-public sealed class ProcessMonitor : IAsyncDisposable
+public enum JobOperationalState
+{
+    Disabled,
+    WaitingForApplications,
+    ApplicationBlocked,
+    WaitingForExit,
+    ReadyForHandoff,
+    Invalid
+}
+
+public enum ParticipantOperationalState
+{
+    Active,
+    Blocked,
+    WaitingForExit,
+    Succeeded,
+    Failed
+}
+
+public sealed record ParticipantEvaluation(
+    JobParticipant Participant,
+    ParticipantOperationalState State,
+    string Detail,
+    bool IsTerminal);
+
+public sealed record JobEvaluation(
+    TrainingJob Job,
+    JobOperationalState State,
+    string Detail,
+    IReadOnlyList<ParticipantEvaluation> Participants,
+    IReadOnlyList<OutgoingMessage> OutgoingMessages,
+    DateTimeOffset EvaluatedAt);
+
+[System.Text.Json.Serialization.JsonConverter(
+    typeof(StrictStringEnumConverter<OutgoingMessageKind>))]
+public enum OutgoingMessageKind
+{
+    BlockedWarning,
+    FinalHandoff
+}
+
+public sealed record OutgoingMessage(
+    string DeliveryId,
+    string JobId,
+    string ConversationUuid,
+    OutgoingMessageKind Kind,
+    string Message,
+    DateTimeOffset CreatedAtUtc);
+
+public static class HandoffIdentity
+{
+    public static string Create(string stableKey)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(stableKey));
+        return Convert.ToHexString(bytes.AsSpan(0, 16)).ToLowerInvariant();
+    }
+}
+
+public sealed class JobEvaluator
+{
+    private readonly IProcessInspector _processInspector;
+    private readonly Func<DateTimeOffset> _utcNow;
+    private readonly HashSet<string> _observedAlive =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public JobEvaluator(
+        IProcessInspector processInspector,
+        Func<DateTimeOffset>? utcNow = null)
+    {
+        _processInspector = processInspector;
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+    }
+
+    public JobEvaluation Evaluate(TrainingJob job, AppSettings settings)
+    {
+        var now = _utcNow();
+        if (!job.Enabled)
+            return new(job, JobOperationalState.Disabled,
+                "Job monitoring is disabled.", [], [], now);
+
+        var participants = job.Participants
+            .Select(participant => EvaluateParticipant(
+                participant, settings, now))
+            .ToArray();
+        var messages = new List<OutgoingMessage>();
+
+        foreach (var blocked in participants.Where(item =>
+                     item.State == ParticipantOperationalState.Blocked))
+        {
+            var process = blocked.Participant.Process;
+            var stableKey = $"{job.Id}|blocked|{blocked.Participant.Id}|" +
+                $"{process.Pid}|{process.Name}|{process.ExecutablePath}|" +
+                $"{process.StartTimeUtc.UtcTicks}";
+            var deliveryId = HandoffIdentity.Create(stableKey);
+            messages.Add(new OutgoingMessage(
+                deliveryId, job.Id, job.InitiatingChatUuid,
+                OutgoingMessageKind.BlockedWarning,
+                HandoffMessageBuilder.BuildBlockedWarning(
+                    job, blocked, deliveryId), now));
+        }
+
+        JobOperationalState state;
+        string detail;
+        if (participants.Any(item =>
+                item.State == ParticipantOperationalState.Blocked))
+        {
+            state = JobOperationalState.ApplicationBlocked;
+            detail = "One or more applications are blocked or stale.";
+        }
+        else if (participants.Any(item =>
+                     item.State == ParticipantOperationalState.Active))
+        {
+            state = JobOperationalState.WaitingForApplications;
+            detail = "Waiting for every application to report a terminal state.";
+        }
+        else if (participants.Any(item =>
+                     item.State == ParticipantOperationalState.WaitingForExit))
+        {
+            state = JobOperationalState.WaitingForExit;
+            detail = "Every reporting application is terminal; waiting for shutdown.";
+        }
+        else
+        {
+            state = JobOperationalState.ReadyForHandoff;
+            detail = "All applications are terminal and no matching process is running.";
+            var deliveryId = HandoffIdentity.Create($"{job.Id}|final");
+            messages.Add(new OutgoingMessage(
+                deliveryId, job.Id, job.InitiatingChatUuid,
+                OutgoingMessageKind.FinalHandoff,
+                HandoffMessageBuilder.BuildFinal(job, participants,
+                    deliveryId), now));
+        }
+
+        return new(job, state, detail, participants, messages, now);
+    }
+
+    private ParticipantEvaluation EvaluateParticipant(
+        JobParticipant participant, AppSettings settings, DateTimeOffset now)
+    {
+        var inspection = _processInspector.Inspect(participant.Process);
+        var matchingAlive = inspection.IsAlive && inspection.FingerprintMatches;
+        var fingerprintKey = FingerprintKey(participant.Process);
+        if (matchingAlive)
+            _observedAlive.Add(fingerprintKey);
+        var declaredTerminal = participant.State is
+            ParticipantState.Succeeded or ParticipantState.Failed;
+
+        if (inspection.IsAlive && inspection.IdentityIndeterminate)
+            return new(participant, ParticipantOperationalState.Blocked,
+                "The process is still present, but its identity and shutdown " +
+                "cannot be verified.", false);
+
+        if (matchingAlive && participant.State == ParticipantState.Blocked)
+            return new(participant, ParticipantOperationalState.Blocked,
+                string.IsNullOrWhiteSpace(participant.Detail)
+                    ? "Application declared itself blocked."
+                    : participant.Detail, false);
+
+        if (matchingAlive && inspection.IsResponding == false)
+            return new(participant, ParticipantOperationalState.Blocked,
+                "The application window is not responding.", false);
+
+        if (matchingAlive && participant.State is
+                ParticipantState.Pending or ParticipantState.Running &&
+            participant.HeartbeatUtc is { } heartbeat &&
+            now - heartbeat > TimeSpan.FromMilliseconds(settings.HeartbeatStaleMs))
+            return new(participant, ParticipantOperationalState.Blocked,
+                $"Heartbeat is stale. Last heartbeat: {heartbeat:O}; " +
+                $"threshold: {settings.HeartbeatStaleMs} ms.",
+                false);
+
+        if (declaredTerminal)
+        {
+            if (matchingAlive)
+                return new(participant,
+                    ParticipantOperationalState.WaitingForExit,
+                    "Terminal handoff recorded; matching process is still running.",
+                    false);
+            return new(participant,
+                participant.State == ParticipantState.Succeeded
+                    ? ParticipantOperationalState.Succeeded
+                    : ParticipantOperationalState.Failed,
+                string.IsNullOrWhiteSpace(participant.Detail)
+                    ? "The application reported a terminal state without detail."
+                    : participant.Detail,
+                true);
+        }
+
+        if (matchingAlive)
+            return new(participant, ParticipantOperationalState.Active,
+                inspection.Detail, false);
+
+        if (participant.State == ParticipantState.Pending &&
+            !_observedAlive.Contains(fingerprintKey))
+        {
+            if (participant.HeartbeatUtc is { } pendingHeartbeat &&
+                now - pendingHeartbeat >
+                    TimeSpan.FromMilliseconds(settings.HeartbeatStaleMs))
+                return new(participant, ParticipantOperationalState.Blocked,
+                    "Pending application did not start and its heartbeat is " +
+                    $"stale. Last heartbeat: {pendingHeartbeat:O}; threshold: " +
+                    $"{settings.HeartbeatStaleMs} ms.", false);
+            return new(participant, ParticipantOperationalState.Active,
+                "Waiting for the pending application fingerprint to appear.",
+                false);
+        }
+
+        return new(participant, ParticipantOperationalState.Failed,
+            "Process stopped or its fingerprint changed before a terminal " +
+            "handoff was recorded.", true);
+    }
+
+    private static string FingerprintKey(ProcessFingerprint process) =>
+        $"{process.Pid}|{process.Name}|{process.ExecutablePath}|" +
+        $"{process.StartTimeUtc.UtcTicks}";
+}
+
+public sealed class JobMonitor : IAsyncDisposable
 {
     private readonly Func<WatchConfiguration> _configuration;
-    private readonly ICompletionDetector _completionDetector;
-    private readonly Dictionary<string, RuntimeState> _states =
-        new(StringComparer.OrdinalIgnoreCase);
+    private readonly JobEvaluator _evaluator;
+    private readonly HashSet<string> _emittedDeliveries =
+        new(StringComparer.Ordinal);
     private CancellationTokenSource? _cancellation;
     private Task? _worker;
 
-    public ProcessMonitor(
+    public JobMonitor(
         Func<WatchConfiguration> configuration,
-        ICompletionDetector completionDetector)
+        JobEvaluator evaluator)
     {
         _configuration = configuration;
-        _completionDetector = completionDetector;
+        _evaluator = evaluator;
     }
 
-    public event Action<WatchStatus>? StatusChanged;
-    public event Action<WatchEvent>? Triggered;
+    public event Action<JobEvaluation>? StatusChanged;
+    public event Action<OutgoingMessage>? DeliveryRequested;
 
     public void Start()
     {
@@ -115,102 +324,63 @@ public sealed class ProcessMonitor : IAsyncDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             var config = _configuration();
-            await PollOnceAsync(config, cancellationToken);
+            PollOnce(config);
             await Task.Delay(
-                Math.Max(config.Settings.PollIntervalMs, 250),
+                Math.Clamp(config.Settings.PollIntervalMs, 250, 60_000),
                 cancellationToken);
         }
     }
 
-    public async Task PollOnceAsync(
-        WatchConfiguration config,
-        CancellationToken cancellationToken = default)
+    public IReadOnlyList<JobEvaluation> PollOnce(WatchConfiguration config)
     {
-        var activeIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var watch in config.Watches)
+        var evaluations = new List<JobEvaluation>();
+        foreach (var job in config.Jobs)
         {
-            activeIds.Add(watch.Id);
-            if (!watch.Enabled)
-            {
-                Publish(watch, "Disabled", "Monitoring disabled.");
-                continue;
-            }
-
-            var identity = IdentityKey(watch.Process);
-            if (!_states.TryGetValue(watch.Id, out var state) ||
-                state.Identity != identity)
-            {
-                state = new RuntimeState(identity);
-                _states[watch.Id] = state;
-            }
-
-            var inspection = ProcessIdentityVerifier.Inspect(watch.Process);
-            if (!inspection.IsAlive)
-            {
-                if (state.SeenAlive && !state.Triggered)
-                    Fire(watch, state, WatchTriggerKind.Exit, inspection.Detail);
-                Publish(watch, state.Triggered ? "Handled" : "Not running",
-                    inspection.Detail);
-                continue;
-            }
-
-            if (!inspection.FingerprintMatches)
-            {
-                state.StableCompletionPolls = 0;
-                Publish(watch, "Stale PID", inspection.Detail);
-                continue;
-            }
-
-            state.SeenAlive = true;
-            if (state.Triggered)
-            {
-                Publish(watch, "Handled", "One handoff already prepared.");
-                continue;
-            }
-
-            bool complete;
             try
             {
-                complete = await _completionDetector.IsCompleteAsync(
-                    watch, cancellationToken);
+                var evaluation = _evaluator.Evaluate(job, config.Settings);
+                evaluations.Add(evaluation);
+                SafeInvoke(StatusChanged, evaluation);
+                foreach (var message in evaluation.OutgoingMessages)
+                {
+                    if (_emittedDeliveries.Contains(message.DeliveryId))
+                        continue;
+                    if (SafeInvoke(DeliveryRequested, message))
+                        _emittedDeliveries.Add(message.DeliveryId);
+                }
             }
             catch (Exception exception)
             {
-                Publish(watch, "Detector error", exception.Message);
-                continue;
+                var evaluation = new JobEvaluation(job,
+                    JobOperationalState.Invalid, exception.Message, [], [],
+                    DateTimeOffset.UtcNow);
+                evaluations.Add(evaluation);
+                SafeInvoke(StatusChanged, evaluation);
             }
-
-            state.StableCompletionPolls = complete
-                ? state.StableCompletionPolls + 1 : 0;
-            if (state.StableCompletionPolls >=
-                config.Settings.CompletionStablePolls)
-                Fire(watch, state, WatchTriggerKind.Completion,
-                    "Configured completion state remained stable.");
-
-            Publish(watch, state.Triggered ? "Queued" : "Watching",
-                complete ? "Completion state observed." : inspection.Detail);
         }
-
-        foreach (var removed in _states.Keys.Except(activeIds).ToArray())
-            _states.Remove(removed);
+        return evaluations;
     }
 
-    private void Fire(
-        WatchItem watch, RuntimeState state,
-        WatchTriggerKind trigger, string detail)
+    private static bool SafeInvoke<T>(Action<T>? handlers, T value)
     {
-        state.Triggered = true;
-        Triggered?.Invoke(new WatchEvent(
-            watch, trigger, DateTimeOffset.UtcNow, detail));
+        if (handlers is null)
+            return false;
+        var succeeded = false;
+        foreach (Action<T> handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(value);
+                succeeded = true;
+            }
+            catch
+            {
+                // A failed observer must not terminate monitoring. The event is
+                // retried on the next poll unless another observer accepted it.
+            }
+        }
+        return succeeded;
     }
-
-    private void Publish(WatchItem watch, string state, string detail) =>
-        StatusChanged?.Invoke(new WatchStatus(
-            watch.Id, watch.Process.Pid, state, detail, DateTimeOffset.Now));
-
-    private static string IdentityKey(ProcessFingerprint process) =>
-        $"{process.Pid}|{process.Name}|{process.ExecutablePath}|" +
-        process.StartTimeUtc.UtcTicks;
 
     public async ValueTask DisposeAsync()
     {
@@ -223,13 +393,7 @@ public sealed class ProcessMonitor : IAsyncDisposable
             catch (OperationCanceledException) { }
         }
         _cancellation.Dispose();
-    }
-
-    private sealed class RuntimeState(string identity)
-    {
-        public string Identity { get; } = identity;
-        public bool SeenAlive { get; set; }
-        public bool Triggered { get; set; }
-        public int StableCompletionPolls { get; set; }
+        _cancellation = null;
+        _worker = null;
     }
 }

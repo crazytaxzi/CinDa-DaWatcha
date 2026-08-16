@@ -1,24 +1,26 @@
 <Window x:Class="CinDa.DaWatcha.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="CinDa-DaWatcha" Height="760" Width="1180"
-        MinHeight="620" MinWidth="960"
-        Background="#111318" Foreground="#F2F4F8"
-        Loaded="OnLoaded" Closed="OnClosed">
+        Title="CinDa-DaWatcha" Height="860" Width="1320"
+        MinHeight="720" MinWidth="1100"
+        Background="#101218" Foreground="#F3F5F8"
+        Loaded="OnLoaded" Closing="OnClosing">
     <Window.Resources>
-        <SolidColorBrush x:Key="PanelBrush" Color="#1B1F27"/>
-        <SolidColorBrush x:Key="AccentBrush" Color="#FF5F7A"/>
+        <SolidColorBrush x:Key="PanelBrush" Color="#1A1F29"/>
+        <SolidColorBrush x:Key="AccentBrush" Color="#3B82F6"/>
+        <SolidColorBrush x:Key="DangerBrush" Color="#B91C1C"/>
         <Style TargetType="Button">
-            <Setter Property="Padding" Value="14,8"/>
+            <Setter Property="Padding" Value="13,8"/>
             <Setter Property="Margin" Value="4"/>
-            <Setter Property="Background" Value="#2B303B"/>
-            <Setter Property="Foreground" Value="#F2F4F8"/>
-            <Setter Property="BorderBrush" Value="#3D4452"/>
+            <Setter Property="Background" Value="#2A3240"/>
+            <Setter Property="Foreground" Value="#F3F5F8"/>
+            <Setter Property="BorderBrush" Value="#465267"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
         </Style>
         <Style TargetType="TextBox">
-            <Setter Property="Background" Value="#0E1014"/>
-            <Setter Property="Foreground" Value="#F2F4F8"/>
-            <Setter Property="BorderBrush" Value="#3D4452"/>
+            <Setter Property="Background" Value="#0C0F14"/>
+            <Setter Property="Foreground" Value="#F3F5F8"/>
+            <Setter Property="BorderBrush" Value="#465267"/>
             <Setter Property="Padding" Value="8"/>
         </Style>
     </Window.Resources>
@@ -28,91 +30,142 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Margin="0,0,0,14">
-            <TextBlock Text="CinDa-DaWatcha"
-                       FontSize="28" FontWeight="Bold"/>
-            <TextBlock Text="PID completion watcher and manual ChatGPT handoff controller"
-                       Foreground="#9CA5B5" FontSize="13"/>
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock Text="CinDa-DaWatcha" FontSize="28" FontWeight="Bold"/>
+            <TextBlock Text="Local training-run monitor and automatic ChatGPT browser handoff controller"
+                       Foreground="#AAB3C2" FontSize="13"/>
         </StackPanel>
 
-        <Grid Grid.Row="1" Margin="0,0,0,10">
+        <Grid Grid.Row="1" Margin="0,0,0,8">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Watch file"
+            <TextBlock Grid.Column="0" Text="Job ledger" FontWeight="SemiBold"
                        VerticalAlignment="Center" Margin="0,0,10,0"/>
             <TextBox x:Name="ConfigPathBox" Grid.Column="1"/>
-            <Button Grid.Column="2" Content="Browse…" Click="OnBrowse"/>
-            <Button Grid.Column="3" Content="Reload" Click="OnReload"/>
+            <Button Grid.Column="2" Content="Choose ledger..." Click="OnBrowse"/>
+            <Button Grid.Column="3" Content="Validate and reload" Click="OnReload"/>
         </Grid>
 
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button x:Name="StartButton" Content="Start monitoring"
+        <WrapPanel Grid.Row="2" Margin="0,0,0,8">
+            <Button x:Name="StartButton" Content="START MONITORING"
                     Background="{StaticResource AccentBrush}" Click="OnStart"/>
-            <Button x:Name="PauseButton" Content="Pause"
+            <Button x:Name="PauseButton" Content="PAUSE SAFELY"
                     IsEnabled="False" Click="OnPause"/>
-            <Button Content="Open managed Firefox" Click="OnOpenManagedFirefox"/>
-            <Button Content="Open selected chat" Click="OnOpenSelectedChat"/>
-            <Button x:Name="ConfirmButton" Content="Confirm message sent"
-                    IsEnabled="False" Click="OnConfirmSent"/>
-        </StackPanel>
+            <Button x:Name="LoginButton" Content="Open Firefox / Sign in"
+                    IsEnabled="False" Click="OnOpenManagedFirefox"/>
+            <Button x:Name="OpenTargetButton" Content="Open initiating UUID"
+                    IsEnabled="False" Click="OnOpenTarget"/>
+            <Button x:Name="OpenRecoveryButton"
+                    Content="Open recovery UUID (never reroutes)"
+                    IsEnabled="False" Click="OnOpenRecovery"/>
+        </WrapPanel>
 
-        <Grid Grid.Row="3">
+        <Border x:Name="OperationalBanner" Grid.Row="3"
+                Background="#243044" BorderBrush="#3B82F6" BorderThickness="1"
+                CornerRadius="6" Padding="12" Margin="0,0,0,10">
+            <StackPanel>
+                <TextBlock x:Name="OperationalStateText" Text="READY"
+                           FontSize="18" FontWeight="Bold"/>
+                <TextBlock x:Name="OperationalDetailText"
+                           Text="Load a ledger, then start monitoring."
+                           Foreground="#D8DEE9" TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+
+        <Grid Grid.Row="4">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="2.2*"/>
-                <ColumnDefinition Width="8"/>
-                <ColumnDefinition Width="1*"/>
+                <ColumnDefinition Width="2.3*"/>
+                <ColumnDefinition Width="10"/>
+                <ColumnDefinition Width="1.2*"/>
             </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Background="{StaticResource PanelBrush}"
                     CornerRadius="6" Padding="8">
-                <DataGrid x:Name="WatchGrid" AutoGenerateColumns="False"
+                <DataGrid x:Name="JobGrid" AutoGenerateColumns="False"
                           IsReadOnly="True" SelectionMode="Single"
-                          Background="#1B1F27" Foreground="#F2F4F8"
-                          RowBackground="#1B1F27"
-                          AlternatingRowBackground="#20252E"
-                          GridLinesVisibility="Horizontal"
-                          BorderThickness="0">
+                          SelectionChanged="OnJobSelectionChanged"
+                          Background="#1A1F29" Foreground="#F3F5F8"
+                          RowBackground="#1A1F29"
+                          AlternatingRowBackground="#202735"
+                          GridLinesVisibility="Horizontal" BorderThickness="0">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="Watch" Binding="{Binding Id}" Width="1.3*"/>
-                        <DataGridTextColumn Header="PID" Binding="{Binding Pid}" Width="70"/>
-                        <DataGridTextColumn Header="Process" Binding="{Binding ProcessName}" Width="1.2*"/>
-                        <DataGridTextColumn Header="UUID" Binding="{Binding ShortUuid}" Width="1.2*"/>
-                        <DataGridTextColumn Header="State" Binding="{Binding State}" Width="110"/>
+                        <DataGridTextColumn Header="Job" Binding="{Binding Id}" Width="1.1*"/>
+                        <DataGridTextColumn Header="Initiating UUID" Binding="{Binding ShortUuid}" Width="1.1*"/>
+                        <DataGridTextColumn Header="Applications" Binding="{Binding ParticipantSummary}" Width="1.2*"/>
+                        <DataGridTextColumn Header="Operational state" Binding="{Binding State}" Width="1.3*"/>
+                        <DataGridTextColumn Header="Delivery" Binding="{Binding Delivery}" Width="1.1*"/>
                         <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="2*"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Border>
 
-            <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Stretch"
-                          Background="#111318"/>
+            <GridSplitter Grid.Column="1" Width="10"
+                          HorizontalAlignment="Stretch" Background="#101218"/>
 
-            <Border Grid.Column="2" Background="{StaticResource PanelBrush}"
-                    CornerRadius="6" Padding="10">
-                <DockPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="Event log"
-                               FontWeight="SemiBold" Margin="0,0,0,8"/>
-                    <ListBox x:Name="LogList" Background="#0E1014"
-                             Foreground="#C8CED8" BorderThickness="0"
-                             FontFamily="Consolas" FontSize="11"/>
-                </DockPanel>
-            </Border>
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="10"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Background="{StaticResource PanelBrush}"
+                        CornerRadius="6" Padding="12">
+                    <StackPanel>
+                        <TextBlock Text="ACTIVE DELIVERY / RECOVERY"
+                                   FontWeight="Bold" Foreground="#93C5FD"/>
+                        <TextBlock x:Name="DeliveryPhaseText" Text="None"
+                                   FontSize="17" FontWeight="Bold" Margin="0,6,0,2"/>
+                        <TextBlock x:Name="ActiveJobText" Text="Job: —"/>
+                        <TextBlock x:Name="ActiveUuidText" Text="Initiating UUID: —"
+                                   TextWrapping="Wrap"/>
+                        <TextBlock x:Name="ActiveAttemptText" Text="Attempt: —"/>
+                        <TextBlock x:Name="ActiveErrorText" Text=""
+                                   Foreground="#FCA5A5" TextWrapping="Wrap"
+                                   Margin="0,5,0,5"/>
+                        <WrapPanel>
+                            <Button x:Name="RetryButton" Content="RETRY AUTOMATIC DELIVERY"
+                                    IsEnabled="False" Click="OnRetryDelivery"/>
+                            <Button x:Name="ManualSendButton" Content="SEND NOW"
+                                    Background="{StaticResource DangerBrush}"
+                                    IsEnabled="False" Click="OnManualSend"/>
+                            <Button x:Name="VerifyDeliveryButton"
+                                    Content="VERIFY SENT MESSAGE"
+                                    IsEnabled="False" Click="OnVerifyDelivery"/>
+                            <Button x:Name="CopyHandoffButton" Content="COPY HANDOFF TEXT"
+                                    IsEnabled="False" Click="OnCopyHandoff"/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Row="2" Background="{StaticResource PanelBrush}"
+                        CornerRadius="6" Padding="10">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top" Text="Operation log (current session)"
+                                   FontWeight="SemiBold" Margin="0,0,0,8"/>
+                        <ListBox x:Name="LogList" Background="#0C0F14"
+                                 Foreground="#CBD5E1" BorderThickness="0"
+                                 FontFamily="Consolas" FontSize="11"/>
+                    </DockPanel>
+                </Border>
+            </Grid>
         </Grid>
 
-        <Border Grid.Row="4" Margin="0,10,0,0"
-                Background="#1B1F27" CornerRadius="6" Padding="10">
+        <Border Grid.Row="5" Margin="0,10,0,0"
+                Background="#1A1F29" CornerRadius="6" Padding="10">
             <DockPanel>
-                <TextBlock x:Name="StatusText" Text="Ready."
-                           Foreground="#D5DAE2"/>
+                <TextBlock x:Name="StatusText" Text="Ready."/>
                 <TextBlock x:Name="QueueText" DockPanel.Dock="Right"
-                           Text="Pending: 0" Foreground="#9CA5B5"/>
+                           Text="Outstanding deliveries: 0" Foreground="#AAB3C2"/>
             </DockPanel>
         </Border>
     </Grid>

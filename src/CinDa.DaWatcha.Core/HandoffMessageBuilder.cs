@@ -1,55 +1,95 @@
 using System.Text;
+using System.Globalization;
 
 namespace CinDa.DaWatcha.Core;
 
 public static class HandoffMessageBuilder
 {
-    public static string Build(HandoffBatch batch)
+    public static string BuildBlockedWarning(
+        TrainingJob job,
+        ParticipantEvaluation blocked,
+        string deliveryId)
     {
+        var participant = blocked.Participant;
         var text = new StringBuilder();
-        text.AppendLine("Process handoff batch");
-        text.AppendLine($"Generated: {DateTimeOffset.Now:O}");
-        text.AppendLine($"Conversation: {batch.ConversationUuid}");
+        text.AppendLine("CinDa-DaWatcha blocked application warning");
+        text.AppendLine(CultureInfo.InvariantCulture, $"Job: {job.Id}");
+        text.AppendLine(CultureInfo.InvariantCulture,
+            $"Application: {participant.Id}");
+        text.AppendLine(CultureInfo.InvariantCulture,
+            $"PID: {participant.Process.Pid}");
+        text.AppendLine(CultureInfo.InvariantCulture,
+            $"Process: {participant.Process.Name}");
+        text.AppendLine(CultureInfo.InvariantCulture,
+            $"Application update: {participant.UpdatedAtUtc:O}");
+        text.AppendLine(CultureInfo.InvariantCulture,
+            $"Reason: {blocked.Detail}");
+        if (!string.IsNullOrWhiteSpace(participant.Detail))
+            text.AppendLine(CultureInfo.InvariantCulture,
+                $"Application detail: {participant.Detail.Trim()}");
         text.AppendLine();
-        text.AppendLine("The following watched tasks reached a terminal state:");
+        text.AppendLine("The local training run has not advanced. Review this " +
+            "application and provide recovery guidance without starting a " +
+            "duplicate run.");
+        text.AppendLine();
+        text.Append(CultureInfo.InvariantCulture,
+            $"CinDa-DaWatcha-ID: {deliveryId}");
+        return text.ToString();
+    }
 
-        foreach (var item in batch.Events)
+    public static string BuildFinal(
+        TrainingJob job,
+        IReadOnlyList<ParticipantEvaluation> participants,
+        string deliveryId)
+    {
+        var failed = participants.Any(item =>
+            item.State == ParticipantOperationalState.Failed);
+        var text = new StringBuilder();
+        text.AppendLine("CinDa-DaWatcha training handoff");
+        text.AppendLine(CultureInfo.InvariantCulture, $"Job: {job.Id}");
+        text.AppendLine(CultureInfo.InvariantCulture,
+            $"Outcome: {(failed ? "FAILURE" : "SUCCESS")}");
+        text.AppendLine(CultureInfo.InvariantCulture,
+            $"Started: {job.CreatedAtUtc:O}");
+        text.AppendLine(CultureInfo.InvariantCulture,
+            $"Job update: {job.UpdatedAtUtc:O}");
+        if (!string.IsNullOrWhiteSpace(job.Summary))
+            text.AppendLine(CultureInfo.InvariantCulture,
+                $"Job summary: {job.Summary.Trim()}");
+
+        foreach (var evaluation in participants)
         {
+            var participant = evaluation.Participant;
             text.AppendLine();
-            text.AppendLine($"## {item.Watch.Id}");
-            text.AppendLine($"- PID: {item.Watch.Process.Pid}");
-            text.AppendLine($"- Process: {item.Watch.Process.Name}");
-            text.AppendLine($"- Trigger: {item.Trigger}");
-            text.AppendLine($"- Observed: {item.OccurredAt:O}");
-            text.AppendLine($"- Detail: {item.Detail}");
-            text.AppendLine();
-            text.AppendLine(item.Watch.PassalongMessage.Trim());
+            text.AppendLine(CultureInfo.InvariantCulture,
+                $"Application: {participant.Id}");
+            text.AppendLine(CultureInfo.InvariantCulture,
+                $"Result: {evaluation.State}");
+            text.AppendLine(CultureInfo.InvariantCulture,
+                $"PID: {participant.Process.Pid}");
+            text.AppendLine(CultureInfo.InvariantCulture,
+                $"Process: {participant.Process.Name}");
+            if (participant.ExitCode is { } exitCode)
+                text.AppendLine(CultureInfo.InvariantCulture,
+                    $"Exit code: {exitCode}");
+            if (participant.FinishedAtUtc is { } finished)
+                text.AppendLine(CultureInfo.InvariantCulture,
+                    $"Finished: {finished:O}");
+            text.AppendLine(CultureInfo.InvariantCulture,
+                $"Detail: {evaluation.Detail}");
+            if (!string.IsNullOrWhiteSpace(participant.HandoffMessage))
+            {
+                text.AppendLine();
+                text.AppendLine(participant.HandoffMessage.Trim());
+            }
         }
 
         text.AppendLine();
-        text.AppendLine($"CinDa-DaWatcha-ID: {Guid.NewGuid():N}");
-        return text.ToString().TrimEnd();
-    }
-
-    public static string BuildFailure(
-        HandoffBatch batch, IReadOnlyList<string> errors)
-    {
-        var text = new StringBuilder();
-        text.AppendLine("CinDa-DaWatcha handoff failure");
-        text.AppendLine($"Original conversation: {batch.ConversationUuid}");
-        text.AppendLine($"Generated: {DateTimeOffset.Now:O}");
+        text.AppendLine("All expected applications are terminal and no matching " +
+            "process remains active.");
         text.AppendLine();
-        text.AppendLine("The monitor failed twice while preparing a handoff.");
-        foreach (var error in errors)
-            text.AppendLine($"- {error}");
-        text.AppendLine();
-        text.AppendLine("Affected watches:");
-        foreach (var item in batch.Events)
-            text.AppendLine($"- {item.Watch.Id} (PID {item.Watch.Process.Pid})");
-        text.AppendLine();
-        text.AppendLine("Please diagnose the browser handoff and preserve this context.");
-        text.AppendLine();
-        text.Append($"CinDa-DaWatcha-ID: {Guid.NewGuid():N}");
+        text.Append(CultureInfo.InvariantCulture,
+            $"CinDa-DaWatcha-ID: {deliveryId}");
         return text.ToString();
     }
 }

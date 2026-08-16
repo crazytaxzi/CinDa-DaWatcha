@@ -1,29 +1,44 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Text.Json;
+using System.Threading.Channels;
 using System.Windows;
+using System.Windows.Controls;
 using CinDa.DaWatcha.Core;
 using Microsoft.Win32;
 
 namespace CinDa.DaWatcha.App;
 
+[SuppressMessage("Design", "CA1001:Types that own disposable fields " +
+    "should be disposable", Justification =
+    "WPF owns the window lifecycle; OnClosing awaits all resource disposal.")]
 public partial class MainWindow : Window
 {
-    private readonly ObservableCollection<WatchRow> _rows = [];
-    private readonly Queue<HandoffBatch> _handoffQueue = new();
-    private readonly SemaphoreSlim _handoffGate = new(1, 1);
-    private WatchConfiguration _configuration = new();
+    private readonly ObservableCollection<JobRow> _rows = [];
+    private readonly Dictionary<string, JobOperationalState> _jobStates =
+        new(StringComparer.OrdinalIgnoreCase);
+    private Channel<OutgoingMessage>? _incoming;
+    private readonly SemaphoreSlim _manualActionGate = new(1, 1);
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+    private volatile WatchConfiguration _configuration = new();
     private WatchConfigurationService? _configurationService;
-    private ProcessMonitor? _monitor;
-    private EventBatcher? _batcher;
+    private DeliveryStateStore? _deliveryStore;
+    private JobMonitor? _monitor;
     private FirefoxChatController? _browser;
+    private HandoffDeliveryCoordinator? _deliveryCoordinator;
     private CancellationTokenSource? _runCancellation;
-    private PendingHandoff? _pending;
+    private Task? _deliveryWorker;
+    private DeliveryRecord? _manualPending;
+    private bool _automaticDeliveryActive;
+    private bool _closing;
+    private bool _shutdownReady;
 
     public MainWindow()
     {
         InitializeComponent();
-        WatchGrid.ItemsSource = _rows;
+        JobGrid.ItemsSource = _rows;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -32,29 +47,50 @@ public partial class MainWindow : Window
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
             "CinDa-DaWatcha", "watch-config.json");
         ConfigPathBox.Text = path;
-        await EnsureConfigurationFileAsync(path);
-        await ReloadConfigurationAsync();
+        try
+        {
+            await EnsureConfigurationFileAsync(path);
+            await ReloadConfigurationAsync();
+        }
+        catch (Exception exception)
+        {
+            ShowError("Could not initialize the job ledger", exception);
+        }
     }
 
-    private async Task EnsureConfigurationFileAsync(string path)
+    private static async Task EnsureConfigurationFileAsync(string path)
     {
         if (File.Exists(path))
             return;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var json = JsonSerializer.Serialize(new WatchConfiguration(),
-            new JsonSerializerOptions
+        var temp = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            await using (var stream = new FileStream(temp, FileMode.CreateNew,
+                FileAccess.Write, FileShare.None, 4096,
+                FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                WriteIndented = true
-            });
-        await File.WriteAllTextAsync(path, json);
-        AppendLog($"Created starter watch file: {path}");
+                await JsonSerializer.SerializeAsync(stream,
+                    new WatchConfiguration(),
+                    ConfigurationJson.CreateOptions(writeIndented: true));
+                await stream.FlushAsync();
+            }
+            File.Move(temp, path, false);
+        }
+        finally
+        {
+            if (File.Exists(temp))
+                File.Delete(temp);
+        }
     }
 
     private async void OnStart(object sender, RoutedEventArgs e)
     {
+        StartButton.IsEnabled = false;
+        await _lifecycleGate.WaitAsync();
         try
         {
+            await StopServicesAsync();
             _runCancellation = new CancellationTokenSource();
             _configurationService =
                 new WatchConfigurationService(ConfigPathBox.Text);
@@ -62,37 +98,68 @@ public partial class MainWindow : Window
             _configurationService.ReloadFailed += OnConfigurationReloadFailed;
             _configuration = await _configurationService.LoadAsync(
                 _runCancellation.Token);
+            if (Path.GetFullPath(ConfigPathBox.Text).Equals(
+                    Path.GetFullPath(_configuration.Settings.DeliveryStatePath),
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    "The job ledger and delivery-state ledger must use different paths.");
             _configurationService.StartWatching();
 
+            _deliveryStore = new DeliveryStateStore(
+                _configuration.Settings.DeliveryStatePath);
+            await _deliveryStore.InitializeAsync(_runCancellation.Token);
             _browser = new FirefoxChatController(() => _configuration.Settings);
-            _batcher = new EventBatcher(
-                () => _configuration.Settings.BatchWindowMs);
-            _batcher.BatchReady += OnBatchReady;
-            _monitor = new ProcessMonitor(
-                () => _configuration, new WindowCompletionDetector());
-            _monitor.StatusChanged += OnWatchStatusChanged;
-            _monitor.Triggered += OnWatchTriggered;
+            _deliveryCoordinator = new HandoffDeliveryCoordinator(
+                _browser, () => _configuration.Settings);
+            _incoming = Channel.CreateUnbounded<OutgoingMessage>();
+            _monitor = new JobMonitor(
+                () => _configuration,
+                new JobEvaluator(new SystemProcessInspector()));
+            _monitor.StatusChanged += OnJobStatusChanged;
+            _monitor.DeliveryRequested += OnDeliveryRequested;
+            _deliveryWorker = ProcessDeliveriesAsync(
+                _incoming, _runCancellation.Token);
             _monitor.Start();
 
             RefreshRows();
             StartButton.IsEnabled = false;
             PauseButton.IsEnabled = true;
+            LoginButton.IsEnabled = true;
             ConfigPathBox.IsEnabled = false;
-            SetStatus("Monitoring active.");
-            AppendLog("Monitoring started.");
+            SetOperationalState("MONITORING ACTIVE",
+                "Waiting for application-written job updates.", "#166534");
+            AppendLog($"Monitoring started. Delivery state: {_deliveryStore.Path}");
         }
         catch (Exception exception)
         {
             await StopServicesAsync();
             ShowError("Could not start monitoring", exception);
         }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
     }
 
     private async void OnPause(object sender, RoutedEventArgs e)
     {
-        await StopServicesAsync();
-        SetStatus("Monitoring paused.");
-        AppendLog("Monitoring paused.");
+        PauseButton.IsEnabled = false;
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            await StopServicesAsync();
+            SetOperationalState("MONITORING PAUSED",
+                "Durable delivery state was preserved.", "#854D0E");
+            AppendLog("Monitoring paused safely.");
+        }
+        catch (Exception exception)
+        {
+            ShowError("Could not pause monitoring cleanly", exception);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
     }
 
     private async void OnReload(object sender, RoutedEventArgs e) =>
@@ -104,7 +171,6 @@ public partial class MainWindow : Window
         {
             if (!File.Exists(ConfigPathBox.Text))
                 await EnsureConfigurationFileAsync(ConfigPathBox.Text);
-
             if (_configurationService is not null)
                 _configuration = await _configurationService.LoadAsync();
             else
@@ -113,14 +179,13 @@ public partial class MainWindow : Window
                     new WatchConfigurationService(ConfigPathBox.Text);
                 _configuration = await loader.LoadAsync();
             }
-
             RefreshRows();
-            SetStatus($"Loaded {_configuration.Watches.Count} watch record(s).");
-            AppendLog("Configuration loaded.");
+            SetStatus($"Validated {_configuration.Jobs.Count} job(s).");
+            AppendLog("Job ledger validated and loaded.");
         }
         catch (Exception exception)
         {
-            ShowError("Configuration is invalid", exception);
+            ShowError("Job ledger is invalid", exception);
         }
     }
 
@@ -130,209 +195,354 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(() =>
         {
             RefreshRows();
-            SetStatus("Configuration hot-reloaded.");
-            AppendLog("Watch file changed; variables refreshed.");
+            SetStatus("Job ledger hot-reloaded.");
+            AppendLog("Job ledger changed; complete validated snapshot accepted.");
         });
     }
 
     private void OnConfigurationReloadFailed(Exception exception) =>
         Dispatcher.BeginInvoke(() =>
         {
-            SetStatus("Configuration reload failed.");
-            AppendLog($"RELOAD ERROR: {exception.Message}");
+            SetOperationalState("LEDGER UPDATE REJECTED",
+                "The last valid snapshot remains active. " + exception.Message,
+                "#991B1B");
+            AppendLog($"LEDGER ERROR: {exception.Message}");
         });
 
-    private void OnWatchStatusChanged(WatchStatus status) =>
+    private void OnJobStatusChanged(JobEvaluation evaluation) =>
         Dispatcher.BeginInvoke(() =>
         {
-            var index = FindRow(status.WatchId);
+            var index = FindRow(evaluation.Job.Id);
+            if (index < 0)
+            {
+                RefreshRows();
+                index = FindRow(evaluation.Job.Id);
+            }
             if (index < 0)
                 return;
             var current = _rows[index];
+            _jobStates[evaluation.Job.Id] = evaluation.State;
             _rows[index] = current with
             {
-                State = status.State,
-                Detail = status.Detail,
-                UpdatedAt = status.UpdatedAt
+                ParticipantSummary = FormatParticipants(evaluation.Participants),
+                State = FormatState(evaluation.State),
+                Detail = evaluation.Detail
             };
+            if (evaluation.State == JobOperationalState.ApplicationBlocked &&
+                !_automaticDeliveryActive && _manualPending is null)
+                SetOperationalState("APPLICATION BLOCKED",
+                    $"{evaluation.Job.Id}: {evaluation.Detail}", "#991B1B");
+            else if (!_jobStates.Values.Any(state =>
+                         state == JobOperationalState.ApplicationBlocked) &&
+                     !_automaticDeliveryActive && _manualPending is null &&
+                     OperationalStateText.Text == "APPLICATION BLOCKED")
+                SetOperationalState("MONITORING ACTIVE",
+                    "The blocked condition cleared; monitoring continues.",
+                    "#166534");
         });
 
-    private void OnWatchTriggered(WatchEvent watchEvent)
+    private void OnDeliveryRequested(OutgoingMessage message)
     {
-        _batcher?.Submit(watchEvent);
-        Dispatcher.BeginInvoke(() =>
-        {
-            AppendLog($"{watchEvent.Watch.Id}: {watchEvent.Trigger} detected.");
-            SetStatus("Completion event queued.");
-        });
+        if (_incoming is null || !_incoming.Writer.TryWrite(message))
+            AppendLog($"QUEUE ERROR: could not accept {message.DeliveryId}.");
     }
 
-    private void OnBatchReady(HandoffBatch batch) =>
-        Dispatcher.BeginInvoke(() =>
-        {
-            _handoffQueue.Enqueue(batch);
-            UpdateQueueText();
-            _ = PrepareNextBatchAsync();
-        });
-
-    private async Task PrepareNextBatchAsync()
+    private async Task ProcessDeliveriesAsync(
+        Channel<OutgoingMessage> incoming,
+        CancellationToken cancellationToken)
     {
-        await _handoffGate.WaitAsync();
+        if (_deliveryStore is null || _deliveryCoordinator is null)
+            return;
         try
         {
-            if (_pending is not null || _handoffQueue.Count == 0 ||
-                _browser is null || _runCancellation is null)
-                return;
-
-            var batch = _handoffQueue.Dequeue();
-            UpdateQueueText();
-            var message = HandoffMessageBuilder.Build(batch);
-            var errors = new List<string>();
-            var retries = Math.Max(1, _configuration.Settings.HandoffRetries);
-
-            for (var attempt = 1; attempt <= retries; attempt++)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
-                    SetStatus($"Preparing handoff attempt {attempt}/{retries}.");
-                    await _browser.StartAsync(_runCancellation.Token);
-                    await _browser.NavigateToConversationAsync(
-                        batch.ConversationUuid, _runCancellation.Token);
-                    var bytes = await _browser.GetVisibleConversationBytesAsync(
-                        _runCancellation.Token);
-                    var rollover = bytes >=
-                        _configuration.Settings.ConversationLimitBytes;
-                    if (rollover)
+                    while (incoming.Reader.TryRead(out var message))
                     {
-                        AppendLog($"Conversation is {bytes:N0} bytes; opening a new chat.");
-                        await _browser.OpenNewConversationAsync(
-                            _runCancellation.Token);
+                        try
+                        {
+                            await RegisterIncomingAsync(message,
+                                cancellationToken);
+                        }
+                        catch
+                        {
+                            incoming.Writer.TryWrite(message);
+                            throw;
+                        }
                     }
 
-                    await _browser.PrepareMessageAsync(
-                        message, _runCancellation.Token);
-                    await _browser.WaitForSendReadyAsync(
-                        _runCancellation.Token);
-                    _pending = new PendingHandoff(batch, message, rollover);
-                    ConfirmButton.IsEnabled = true;
-                    SetStatus("Message prepared. Send it manually, then confirm.");
-                    AppendLog($"Handoff ready for {batch.ConversationUuid}.");
-                    return;
+                    if (_manualPending is null &&
+                        await ProcessNextOutstandingAsync(cancellationToken))
+                        continue;
+
+                    if (!await incoming.Reader.WaitToReadAsync(cancellationToken))
+                        break;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
                 }
                 catch (Exception exception)
                 {
-                    var error = $"Attempt {attempt}: {exception.Message}";
-                    errors.Add(error);
-                    AppendLog($"HANDOFF ERROR: {error}");
+                    await Dispatcher.BeginInvoke(() =>
+                    {
+                        SetOperationalState("DELIVERY RETRY PENDING",
+                            exception.Message, "#991B1B");
+                        AppendLog($"DELIVERY ERROR (will retry): {exception.Message}");
+                    });
+                    await Task.Delay(1000, cancellationToken);
                 }
             }
+        }
+        catch (OperationCanceledException) { }
+    }
 
-            await PrepareFailureReportAsync(batch, errors);
+    private async Task RegisterIncomingAsync(
+        OutgoingMessage message, CancellationToken cancellationToken)
+    {
+        if (_deliveryStore is null)
+            return;
+        var disposition = await _deliveryStore.EnqueueAsync(
+            message, cancellationToken);
+        await Dispatcher.BeginInvoke(() =>
+        {
+            switch (disposition)
+            {
+                case EnqueueDisposition.Added:
+                    AppendLog($"Queued {message.Kind} {message.DeliveryId} " +
+                        $"for job {message.JobId}.");
+                    SetJobDelivery(message.JobId, "Queued");
+                    break;
+                case EnqueueDisposition.AlreadyDelivered:
+                    SetJobDelivery(message.JobId, "Delivered");
+                    break;
+                case EnqueueDisposition.RouteConflict:
+                    SetOperationalState("UUID ROUTE CONFLICT",
+                        $"Job {message.JobId} attempted to change its initiating UUID. " +
+                        "The delivery was quarantined.", "#991B1B");
+                    AppendLog($"ROUTE CONFLICT: job {message.JobId}.");
+                    break;
+                case EnqueueDisposition.PayloadConflict:
+                    SetOperationalState("HANDOFF CONTENT CONFLICT",
+                        $"Delivery ID {message.DeliveryId} changed content. " +
+                        "The delivery was quarantined.", "#991B1B");
+                    AppendLog($"PAYLOAD CONFLICT: {message.DeliveryId}.");
+                    break;
+            }
+        });
+        await UpdateQueueTextAsync(cancellationToken);
+    }
+
+    private async Task<bool> ProcessNextOutstandingAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_deliveryStore is null || _deliveryCoordinator is null)
+            return false;
+        var outstanding = await _deliveryStore.GetOutstandingAsync(
+            cancellationToken);
+        var next = outstanding.Count == 0 ? null : outstanding[0];
+        if (next is null)
+        {
+            await UpdateQueueTextAsync(cancellationToken);
+            return false;
+        }
+        if (next.Status == DeliveryStatus.ManualSendRequired)
+        {
+            _manualPending = next;
+            await Dispatcher.BeginInvoke(() => ShowManualRequired(next));
+            await UpdateQueueTextAsync(cancellationToken);
+            return false;
+        }
+
+        await Dispatcher.BeginInvoke(() =>
+        {
+            ShowActiveDelivery(next, "Starting automatic delivery", "");
+            SetJobDelivery(next.JobId, "Automatic delivery");
+            SetOperationalState("AUTOMATIC HANDOFF IN PROGRESS",
+                $"Job {next.JobId} is being delivered only to initiating UUID " +
+                $"{next.ConversationUuid}.", "#1D4ED8");
+        });
+        var outcome = await _deliveryCoordinator.DeliverAutomaticallyAsync(
+            next.ToOutgoingMessage(),
+            progress => OnDeliveryProgressAsync(progress, cancellationToken),
+            cancellationToken);
+        if (outcome.Delivered)
+        {
+            await _deliveryStore.MarkDeliveredAsync(
+                next.DeliveryId, cancellationToken);
+            await Dispatcher.BeginInvoke(() =>
+            {
+                SetJobDelivery(next.JobId, "Delivered and verified");
+                SetOperationalState("HANDOFF DELIVERED",
+                    $"Job {next.JobId}, delivery {next.DeliveryId} was verified " +
+                    "in the initiating conversation.", "#166534");
+                AppendLog($"DELIVERED: {next.DeliveryId} to {next.ConversationUuid}.");
+                ClearActiveDelivery();
+            });
+        }
+        else
+        {
+            var error = string.Join(Environment.NewLine, outcome.Errors);
+            await _deliveryStore.MarkManualRequiredAsync(
+                next.DeliveryId, error, cancellationToken);
+            _manualPending = (await _deliveryStore.GetAsync(
+                next.DeliveryId, cancellationToken))!;
+            await Dispatcher.BeginInvoke(() => ShowManualRequired(_manualPending));
+        }
+        await UpdateQueueTextAsync(cancellationToken);
+        return outcome.Delivered;
+    }
+
+    private async Task OnDeliveryProgressAsync(
+        DeliveryProgress progress, CancellationToken cancellationToken)
+    {
+        if (_deliveryStore is not null)
+            await _deliveryStore.MarkAttemptingAsync(
+                progress.DeliveryId, progress.Attempt, progress.Refreshed,
+                progress.Phase, "", cancellationToken);
+        await Dispatcher.BeginInvoke(() =>
+        {
+            DeliveryPhaseText.Text = progress.Phase;
+            ActiveAttemptText.Text = progress.Refreshed
+                ? "Attempt: final refresh recovery"
+                : $"Attempt: {progress.Attempt}";
+            OperationalDetailText.Text = progress.Detail;
+            AppendLog($"{progress.DeliveryId}: {progress.Phase} — {progress.Detail}");
+        });
+    }
+
+    private async void OnRetryDelivery(object sender, RoutedEventArgs e)
+    {
+        var pending = _manualPending;
+        if (pending is null || _deliveryStore is null)
+            return;
+        SetManualButtons(false);
+        await _manualActionGate.WaitAsync();
+        try
+        {
+            if (_manualPending?.DeliveryId != pending.DeliveryId)
+                return;
+            var outgoing = pending.ToOutgoingMessage();
+            await _deliveryStore.ResetQueuedAsync(outgoing.DeliveryId);
+            _manualPending = null;
+            _incoming?.Writer.TryWrite(outgoing);
+            AppendLog($"Operator requested automatic retry for {outgoing.DeliveryId}.");
+        }
+        catch (Exception exception)
+        {
+            ShowManualRequired(pending);
+            ShowError("Could not queue the automatic retry", exception);
         }
         finally
         {
-            _handoffGate.Release();
+            _manualActionGate.Release();
         }
     }
 
-    private async Task PrepareFailureReportAsync(
-        HandoffBatch batch, IReadOnlyList<string> errors)
+    private async void OnManualSend(object sender, RoutedEventArgs e)
     {
-        if (_browser is null || _runCancellation is null)
+        var pending = _manualPending;
+        if (pending is null || _deliveryCoordinator is null ||
+            _deliveryStore is null || _runCancellation is null)
             return;
+        SetManualButtons(false);
+        await _manualActionGate.WaitAsync();
         try
         {
-            var report = HandoffMessageBuilder.BuildFailure(batch, errors);
-            await _browser.OpenNewConversationAsync(_runCancellation.Token);
-            await _browser.PrepareMessageAsync(
-                report, _runCancellation.Token);
-            await _browser.WaitForSendReadyAsync(_runCancellation.Token);
-            _pending = new PendingHandoff(batch, report, true);
-            ConfirmButton.IsEnabled = true;
-            SetStatus("Failure report prepared in a new chat; send manually.");
-            AppendLog("Both attempts failed; prepared diagnostic handoff.");
-        }
-        catch (Exception exception)
-        {
-            SetStatus("Browser handoff failed completely.");
-            AppendLog($"FATAL HANDOFF ERROR: {exception.Message}");
-        }
-    }
-
-    private async void OnConfirmSent(object sender, RoutedEventArgs e)
-    {
-        if (_pending is null || _browser is null ||
-            _configurationService is null || _runCancellation is null)
-            return;
-
-        try
-        {
-            var verification = await _browser.VerifyManualSendAsync(
-                _pending.Message, _runCancellation.Token);
-            if (!verification.BrowserSignalsSatisfied)
+            if (_manualPending?.DeliveryId != pending.DeliveryId)
+                return;
+            SetOperationalState("OPERATOR SEND IN PROGRESS",
+                "Checking the target UUID, then clicking Send once.", "#9A3412");
+            var delivered = await _deliveryCoordinator.SendManualFallbackAsync(
+                pending.ToOutgoingMessage(), _runCancellation.Token);
+            if (!delivered)
             {
-                SetStatus("Send cannot be confirmed yet.");
-                AppendLog(
-                    $"VERIFY: composerEmpty={verification.ComposerEmpty}, " +
-                    $"sendChanged={verification.SendButtonNotReady}, " +
-                    $"messageVisible={verification.UserMessageVisible}");
+                ShowManualRequired(pending);
+                SetStatus("The operator-controlled send was not verified.");
                 return;
             }
-
-            if (_pending.Rollover)
-            {
-                var newUuid = await WaitForConversationUuidAsync(
-                    _runCancellation.Token);
-                if (newUuid is null)
-                    throw new InvalidOperationException(
-                        "The new conversation UUID has not appeared in the URL.");
-                _configuration = await _configurationService.UpdateUuidAsync(
-                    _pending.Batch.ConversationUuid,
-                    newUuid, _runCancellation.Token);
-                AppendLog($"Conversation UUID replaced with {newUuid}.");
-            }
-
-            AppendLog("Manual send verified by all four signals.");
-            _pending = null;
-            ConfirmButton.IsEnabled = false;
-            SetStatus("Handoff completed.");
-            RefreshRows();
-            _ = PrepareNextBatchAsync();
+            await CompleteManualDeliveryAsync(pending);
         }
         catch (Exception exception)
         {
-            ShowError("Could not confirm the handoff", exception);
+            if (_manualPending?.DeliveryId == pending.DeliveryId)
+                ShowManualRequired(pending);
+            ShowError("Operator-controlled send failed", exception);
+        }
+        finally
+        {
+            _manualActionGate.Release();
         }
     }
 
-    private async Task<string?> WaitForConversationUuidAsync(
-        CancellationToken cancellationToken)
+    private async void OnVerifyDelivery(object sender, RoutedEventArgs e)
     {
-        if (_browser is null)
-            return null;
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(15);
-        while (DateTimeOffset.UtcNow < deadline)
+        var pending = _manualPending;
+        if (pending is null || _deliveryCoordinator is null ||
+            _runCancellation is null)
+            return;
+        SetManualButtons(false);
+        await _manualActionGate.WaitAsync();
+        try
         {
-            var uuid = await _browser.CaptureConversationUuidAsync(
-                cancellationToken);
-            if (uuid is not null)
-                return uuid;
-            await Task.Delay(250, cancellationToken);
+            if (_manualPending?.DeliveryId != pending.DeliveryId)
+                return;
+            var verified = await _deliveryCoordinator.VerifyManualFallbackAsync(
+                pending.ToOutgoingMessage(), _runCancellation.Token);
+            if (!verified)
+            {
+                ShowManualRequired(pending);
+                SetStatus("The complete handoff is not visible in the target chat.");
+                return;
+            }
+            await CompleteManualDeliveryAsync(pending);
         }
-        return null;
+        catch (Exception exception)
+        {
+            if (_manualPending?.DeliveryId == pending.DeliveryId)
+                ShowManualRequired(pending);
+            ShowError("Could not verify browser delivery", exception);
+        }
+        finally
+        {
+            _manualActionGate.Release();
+        }
+    }
+
+    private async Task CompleteManualDeliveryAsync(DeliveryRecord record)
+    {
+        if (_deliveryStore is null)
+            return;
+        await _deliveryStore.MarkDeliveredAsync(record.DeliveryId);
+        AppendLog($"DELIVERED: manual recovery verified for {record.DeliveryId}.");
+        SetJobDelivery(record.JobId, "Delivered and verified");
+        _manualPending = null;
+        ClearActiveDelivery();
+        SetOperationalState("HANDOFF DELIVERED",
+            "Manual recovery was verified using the complete message.", "#166534");
+        _incoming?.Writer.TryWrite(record.ToOutgoingMessage());
+        await UpdateQueueTextAsync();
+    }
+
+    private void OnCopyHandoff(object sender, RoutedEventArgs e)
+    {
+        if (_manualPending is null)
+            return;
+        Clipboard.SetText(_manualPending.Message);
+        SetStatus("Complete handoff copied to the clipboard.");
     }
 
     private async void OnOpenManagedFirefox(object sender, RoutedEventArgs e)
     {
-        if (_browser is null || _runCancellation is null)
-        {
-            SetStatus("Start monitoring before opening managed Firefox.");
+        if (_browser is null || _runCancellation is null ||
+            _automaticDeliveryActive)
             return;
-        }
         try
         {
             await _browser.OpenHomeForLoginAsync(_runCancellation.Token);
-            SetStatus("Managed Firefox opened. Sign in to ChatGPT if needed.");
+            SetStatus("Managed Firefox opened. Complete ChatGPT sign-in if needed.");
         }
         catch (Exception exception)
         {
@@ -340,28 +550,44 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void OnOpenSelectedChat(object sender, RoutedEventArgs e)
+    private async void OnOpenTarget(object sender, RoutedEventArgs e)
     {
-        if (WatchGrid.SelectedItem is not WatchRow row)
-        {
-            SetStatus("Select a watch first.");
-            return;
-        }
-        if (_browser is null || _runCancellation is null)
-        {
-            SetStatus("Start monitoring before opening a chat.");
-            return;
-        }
+        var uuid = _manualPending?.ConversationUuid ??
+            (JobGrid.SelectedItem as JobRow)?.Uuid;
+        await OpenUuidAsync(uuid, "initiating");
+    }
 
+    private async void OnOpenRecovery(object sender, RoutedEventArgs e)
+    {
+        var row = JobGrid.SelectedItem as JobRow;
+        var job = _manualPending is not null
+            ? FindJob(_manualPending.JobId)
+            : row is null ? null : FindJob(row.Id);
+        await OpenUuidAsync(job?.RecoveryChatUuid, "recovery");
+    }
+
+    private async Task OpenUuidAsync(string? uuid, string purpose)
+    {
+        if (_automaticDeliveryActive)
+        {
+            SetStatus("Wait for the active automatic delivery to finish.");
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(uuid) || _browser is null ||
+            _runCancellation is null)
+        {
+            SetStatus($"No {purpose} UUID is available.");
+            return;
+        }
         try
         {
             await _browser.NavigateToConversationAsync(
-                row.Uuid, _runCancellation.Token);
-            SetStatus($"Opened chat for {row.Id}.");
+                uuid, _runCancellation.Token);
+            SetStatus($"Opened {purpose} UUID {uuid}. No routing was changed.");
         }
         catch (Exception exception)
         {
-            ShowError("Could not open the conversation", exception);
+            ShowError($"Could not open {purpose} conversation", exception);
         }
     }
 
@@ -369,7 +595,7 @@ public partial class MainWindow : Window
     {
         var dialog = new OpenFileDialog
         {
-            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+            Filter = "JSON job ledgers (*.json)|*.json|All files (*.*)|*.*",
             FileName = "watch-config.json",
             CheckFileExists = false
         };
@@ -379,24 +605,68 @@ public partial class MainWindow : Window
         await ReloadConfigurationAsync();
     }
 
+    private void OnJobSelectionChanged(
+        object sender, SelectionChangedEventArgs e)
+        => RefreshNavigationButtons();
+
+    private void RefreshNavigationButtons()
+    {
+        var job = JobGrid.SelectedItem is JobRow row ? FindJob(row.Id) : null;
+        var manualJob = _manualPending is null
+            ? null : FindJob(_manualPending.JobId);
+        var navigationJob = manualJob ?? job;
+        var canNavigate = _browser is not null && !_automaticDeliveryActive;
+        LoginButton.IsEnabled = canNavigate;
+        OpenTargetButton.IsEnabled = canNavigate && navigationJob is not null;
+        OpenRecoveryButton.IsEnabled = canNavigate &&
+            !string.IsNullOrWhiteSpace(navigationJob?.RecoveryChatUuid);
+    }
+
     private void RefreshRows()
     {
         var previous = _rows.ToDictionary(
             row => row.Id, StringComparer.OrdinalIgnoreCase);
+        var validJobIds = _configuration.Jobs.Select(job => job.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var staleId in _jobStates.Keys
+                     .Where(id => !validJobIds.Contains(id)).ToArray())
+            _jobStates.Remove(staleId);
         _rows.Clear();
-        foreach (var watch in _configuration.Watches)
+        foreach (var job in _configuration.Jobs)
         {
-            previous.TryGetValue(watch.Id, out var old);
-            _rows.Add(new WatchRow(
-                watch.Id,
-                watch.Process.Pid,
-                watch.Process.Name,
-                watch.Chat.Uuid,
-                old?.State ?? (watch.Enabled ? "Ready" : "Disabled"),
-                old?.Detail ?? "",
-                old?.UpdatedAt ?? DateTimeOffset.Now));
+            previous.TryGetValue(job.Id, out var old);
+            _rows.Add(new JobRow(
+                job.Id,
+                job.InitiatingChatUuid,
+                $"{job.Participants.Count} expected",
+                old?.State ?? (job.Enabled ? "Waiting" : "Disabled"),
+                old?.Delivery ?? "Not queued",
+                old?.Detail ?? ""));
         }
     }
+
+    private static string FormatParticipants(
+        IReadOnlyList<ParticipantEvaluation> participants)
+    {
+        if (participants.Count == 0)
+            return "—";
+        return string.Join(", ", participants.Select(item =>
+            $"{item.Participant.Id}: {item.State}"));
+    }
+
+    private static string FormatState(JobOperationalState state) => state switch
+    {
+        JobOperationalState.WaitingForApplications => "Waiting for applications",
+        JobOperationalState.ApplicationBlocked => "APPLICATION BLOCKED",
+        JobOperationalState.WaitingForExit => "Waiting for shutdown",
+        JobOperationalState.ReadyForHandoff => "Ready for handoff",
+        JobOperationalState.Disabled => "Disabled",
+        _ => "Invalid"
+    };
+
+    private TrainingJob? FindJob(string id) =>
+        _configuration.Jobs.FirstOrDefault(job =>
+            job.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
 
     private int FindRow(string id)
     {
@@ -407,10 +677,86 @@ public partial class MainWindow : Window
         return -1;
     }
 
+    private void SetJobDelivery(string jobId, string delivery)
+    {
+        var index = FindRow(jobId);
+        if (index < 0)
+            return;
+        _rows[index] = _rows[index] with { Delivery = delivery };
+    }
+
+    private void ShowActiveDelivery(
+        DeliveryRecord record, string phase, string error)
+    {
+        _automaticDeliveryActive = true;
+        DeliveryPhaseText.Text = phase;
+        ActiveJobText.Text = $"Job: {record.JobId}";
+        ActiveUuidText.Text = $"Initiating UUID: {record.ConversationUuid}";
+        ActiveAttemptText.Text = $"Automatic attempts: {record.AutomaticAttempts}";
+        ActiveErrorText.Text = error;
+        LoginButton.IsEnabled = false;
+        OpenTargetButton.IsEnabled = false;
+        OpenRecoveryButton.IsEnabled = false;
+    }
+
+    private void ShowManualRequired(DeliveryRecord? record)
+    {
+        if (record is null)
+            return;
+        ShowActiveDelivery(record, "MANUAL SEND REQUIRED", record.LastError);
+        _automaticDeliveryActive = false;
+        SetManualButtons(true);
+        RefreshNavigationButtons();
+        SetJobDelivery(record.JobId, "Manual send required");
+        SetOperationalState("MANUAL SEND REQUIRED",
+            "Automatic attempts and refresh recovery failed. Review the exact " +
+            "initiating UUID, then use SEND NOW or send in Firefox and verify.",
+            "#991B1B");
+        AppendLog($"MANUAL REQUIRED: {record.DeliveryId} for job {record.JobId}.");
+    }
+
+    private void SetManualButtons(bool enabled)
+    {
+        RetryButton.IsEnabled = enabled;
+        ManualSendButton.IsEnabled = enabled;
+        VerifyDeliveryButton.IsEnabled = enabled;
+        CopyHandoffButton.IsEnabled = enabled;
+    }
+
+    private void ClearActiveDelivery()
+    {
+        _automaticDeliveryActive = false;
+        DeliveryPhaseText.Text = "None";
+        ActiveJobText.Text = "Job: —";
+        ActiveUuidText.Text = "Initiating UUID: —";
+        ActiveAttemptText.Text = "Attempt: —";
+        ActiveErrorText.Text = "";
+        SetManualButtons(false);
+        RefreshNavigationButtons();
+    }
+
+    private void SetOperationalState(
+        string state, string detail, string background)
+    {
+        OperationalStateText.Text = state;
+        OperationalDetailText.Text = detail;
+        OperationalBanner.Background =
+            (System.Windows.Media.Brush)new System.Windows.Media.BrushConverter()
+                .ConvertFromString(background)!;
+    }
+
     private void SetStatus(string text) => StatusText.Text = text;
 
-    private void UpdateQueueText() =>
-        QueueText.Text = $"Pending: {_handoffQueue.Count + (_pending is null ? 0 : 1)}";
+    private async Task UpdateQueueTextAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (_deliveryStore is null)
+            return;
+        var outstanding = await _deliveryStore.GetOutstandingAsync(
+            cancellationToken);
+        await Dispatcher.BeginInvoke(() =>
+            QueueText.Text = $"Outstanding deliveries: {outstanding.Count}");
+    }
 
     private void AppendLog(string message)
     {
@@ -419,8 +765,8 @@ public partial class MainWindow : Window
             Dispatcher.BeginInvoke(() => AppendLog(message));
             return;
         }
-        LogList.Items.Add($"[{DateTime.Now:HH:mm:ss}] {message}");
-        while (LogList.Items.Count > 500)
+        LogList.Items.Add($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}");
+        while (LogList.Items.Count > 1000)
             LogList.Items.RemoveAt(0);
         if (LogList.Items.Count > 0)
             LogList.ScrollIntoView(LogList.Items[^1]);
@@ -437,46 +783,71 @@ public partial class MainWindow : Window
     private async Task StopServicesAsync()
     {
         _runCancellation?.Cancel();
+        _incoming?.Writer.TryComplete();
         if (_monitor is not null)
             await _monitor.DisposeAsync();
-        if (_batcher is not null)
-            await _batcher.DisposeAsync();
+        if (_deliveryWorker is not null)
+        {
+            try { await _deliveryWorker; }
+            catch (OperationCanceledException) { }
+        }
+        await _manualActionGate.WaitAsync();
+        _manualActionGate.Release();
         _configurationService?.Dispose();
         if (_browser is not null)
             await Task.Run(_browser.Dispose);
+        if (_deliveryStore is not null)
+            await _deliveryStore.DisposeAsync();
 
         _monitor = null;
-        _batcher = null;
+        _deliveryWorker = null;
+        _incoming = null;
         _configurationService = null;
         _browser = null;
+        _deliveryCoordinator = null;
+        _deliveryStore = null;
         _runCancellation?.Dispose();
         _runCancellation = null;
-        _pending = null;
-        _handoffQueue.Clear();
-        ConfirmButton.IsEnabled = false;
+        _manualPending = null;
+        ClearActiveDelivery();
         PauseButton.IsEnabled = false;
         StartButton.IsEnabled = true;
+        LoginButton.IsEnabled = false;
+        OpenTargetButton.IsEnabled = false;
+        OpenRecoveryButton.IsEnabled = false;
         ConfigPathBox.IsEnabled = true;
-        UpdateQueueText();
+        QueueText.Text = "Outstanding deliveries: 0";
     }
 
-    private async void OnClosed(object? sender, EventArgs e) =>
-        await StopServicesAsync();
-
-    private sealed record PendingHandoff(
-        HandoffBatch Batch,
-        string Message,
-        bool Rollover);
+    private async void OnClosing(object? sender, CancelEventArgs e)
+    {
+        if (_shutdownReady)
+            return;
+        e.Cancel = true;
+        if (_closing)
+            return;
+        _closing = true;
+        IsEnabled = false;
+        SetStatus("Closing Firefox and preserving delivery state...");
+        await _lifecycleGate.WaitAsync();
+        try { await StopServicesAsync(); }
+        catch (Exception exception)
+        {
+            AppendLog($"SHUTDOWN ERROR: {exception.Message}");
+        }
+        finally { _lifecycleGate.Release(); }
+        _shutdownReady = true;
+        Close();
+    }
 }
 
-public sealed record WatchRow(
+public sealed record JobRow(
     string Id,
-    int Pid,
-    string ProcessName,
     string Uuid,
+    string ParticipantSummary,
     string State,
-    string Detail,
-    DateTimeOffset UpdatedAt)
+    string Delivery,
+    string Detail)
 {
-    public string ShortUuid => Uuid.Length > 8 ? Uuid[..8] + "…" : Uuid;
+    public string ShortUuid => Uuid.Length > 13 ? Uuid[..13] + "…" : Uuid;
 }

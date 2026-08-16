@@ -1,116 +1,77 @@
 # CinDa-DaWatcha
 
-CinDa-DaWatcha is a Windows desktop monitor that watches fingerprinted
-processes and prepares manual ChatGPT handoffs when a process completes
-or exits.
+CinDa-DaWatcha is a Windows handoff monitor for a group of local training
+applications. Those applications maintain a JSON job ledger. When every member
+has finished and released its process, CinDa-DaWatcha delivers one verified
+summary to the ChatGPT conversation that started the job.
 
-It launches its own Firefox instance with one window and one tab. It
-never attaches to normal Firefox sessions, never installs an extension,
-and never clicks **Send**.
+The runtime uses local Windows process inspection and browser DOM automation in
+an isolated Firefox profile. It does not call the OpenAI API, any other web API,
+email, webhooks, or command-line tools. Network interaction is limited to what
+the managed Firefox browser itself does while displaying ChatGPT.
 
-## MVP behavior
+## Delivery contract
 
-- Hot-reloads a structured JSON watch file.
-- Verifies PID, process name, executable path, and start time.
-- Detects process exit or a stable Windows UI Automation completion state.
-- Emits only one handoff per process run.
-- Batches simultaneous events by ChatGPT conversation UUID.
-- Measures visible conversation text as UTF-8 bytes.
-- Rolls over to a new chat at 5 MiB and atomically replaces the UUID.
-- Tries a handoff twice, then prepares a diagnostic message in a new chat.
-- Requires manual Send plus four-part delivery confirmation.
+- The initiating `/c/{uuid}` is recorded at job startup and is immutable after
+  the first delivery for that job is queued.
+- Every participant is identified by PID, name, executable path, and start time.
+- A stale heartbeat, explicit `Blocked` state, or non-responsive GUI raises one
+  locked-app warning to the initiating UUID.
+- The final result waits until every participant is terminal and no matching
+  process remains alive.
+- A process that disappears without a terminal handoff is reported as failed.
+- The complete final message is deduplicated in a durable delivery ledger.
+- Delivery waits for a stable, idle conversation, sends automatically, and
+  verifies the complete user bubble. It makes the configured attempts, refreshes
+  once for one last attempt, then exposes an unmistakable manual-send fallback.
 
 ## Requirements
 
 - Windows 10 or 11
-- .NET 8 Desktop Runtime or SDK
 - Mozilla Firefox
-- Internet access on first browser run so Selenium Manager can resolve
-  GeckoDriver
+- The packaged release (recommended), or the .NET 8 SDK for source builds
 
-## Build and run
+The release contains `geckodriver.exe`; the program never downloads a driver at
+runtime and does not require `winget`.
+
+## Run from source
 
 ```powershell
-git clone https://github.com/crazytaxzi/CinDa-DaWatcha.git
-cd CinDa-DaWatcha
 dotnet build .\CinDa-DaWatcha.sln -c Release
 dotnet run --project .\src\CinDa.DaWatcha.App -c Release
 ```
 
-On first launch, the app creates:
+At first launch, the program creates:
 
 ```text
 %USERPROFILE%\Documents\CinDa-DaWatcha\watch-config.json
 ```
 
-Start monitoring, choose **Open managed Firefox**, and sign in to
-ChatGPT inside that dedicated browser profile. Normal Firefox windows
-and profiles remain untouched.
+Open the dedicated Firefox window from the dashboard and sign in to ChatGPT.
+The profile and tab are owned only by CinDa-DaWatcha; normal Firefox sessions
+are not attached to or altered.
 
-## Configure a watch
+Copy [watch-config.example.json](watch-config.example.json), then follow the
+normative [job-ledger manual](docs/watch-file-manual.md) and
+[JSON Schema](docs/watch-config.schema.json). Programs may atomically edit the
+selected ledger at any time; CinDa-DaWatcha only reads it.
 
-Use the normative [watched-file instruction manual](docs/watch-file-manual.md)
-and its machine-readable [JSON Schema](docs/watch-config.schema.json). Copy the
-starting shape in [watch-config.example.json](watch-config.example.json).
-
-To capture a process fingerprint:
-
-```powershell
-$p = Get-Process -Id 12345
-[pscustomobject]@{
-  pid = $p.Id
-  name = $p.ProcessName
-  executablePath = $p.Path
-  startTimeUtc = $p.StartTime.ToUniversalTime().ToString("O")
-} | ConvertTo-Json
-```
-
-The UUID is the identifier after `/c/` in a ChatGPT conversation URL.
-The passalong message is stored directly in each watch record.
-
-### Completion rules
-
-Use `"method": "uia-text"` to inspect visible accessible controls owned
-by the PID. A configured pattern must remain visible for
-`completionStablePolls` consecutive polls.
-
-Use `"method": "title"` with `windowTitlePattern` when the application
-reports completion in its title. The title value is treated as a
-case-insensitive regular expression, with substring matching as a
-fallback for an invalid expression.
-
-Console applications without an accessible window still trigger when
-their process exits.
-
-## Manual-send confirmation
-
-CinDa-DaWatcha prepares the message and waits. After sending it yourself,
-select **Confirm message sent**. Completion requires:
-
-1. The composer is empty.
-2. The Send button is no longer ready.
-3. The expected user-message bubble is visible.
-4. You explicitly confirm in the desktop app.
-
-For a rollover chat, the new UUID is captured only after the manual send
-creates the conversation URL.
-
-## Validation
+## Verify from source
 
 ```powershell
 dotnet test .\CinDa-DaWatcha.sln -c Release
-dotnet run --project .\tools\CinDa.DaWatcha.BrowserSmoke -c Release
+dotnet run --project .\tools\CinDa.DaWatcha.BrowserSmoke -c Release -- --driver C:\path\to\geckodriver.exe
 ```
 
-The browser smoke test briefly opens and closes an isolated Firefox
-profile. It does not navigate to ChatGPT.
+The browser smoke test uses a local fixture. It exercises idle detection,
+composer preparation, the Send click, full-message verification, and clean
+shutdown without contacting ChatGPT or sending a real message.
 
-## Current limitations
+## Important limits
 
-- Firefox and ChatGPT DOM changes may require selector maintenance.
-- UI Automation cannot see completion text that an application does not
-  expose through its accessibility tree.
-- A Windows Terminal tab can be hosted by a different PID than its child
-  console process; process-exit detection remains reliable.
-- Only one handoff can await manual confirmation at a time. Later batches
-  stay queued.
+ChatGPT can change its page structure without notice, so every send is verified
+against the complete outgoing text and failures fall back visibly instead of
+being assumed successful. A computer crash between the browser accepting a
+message and rendering it can never provide mathematical exactly-once delivery;
+on restart the program searches the target conversation for the complete message
+before clicking Send again.

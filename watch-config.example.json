@@ -1,38 +1,44 @@
 {
   "settings": {
-    "chatBaseUrl": "https://chatgpt.com",
-    "conversationLimitBytes": 5242880,
     "pollIntervalMs": 1000,
-    "completionStablePolls": 2,
-    "handoffRetries": 2,
-    "batchWindowMs": 3000,
+    "heartbeatStaleMs": 120000,
+    "conversationIdlePollMs": 1000,
+    "conversationIdleStablePolls": 3,
+    "conversationIdleTimeoutMs": 900000,
+    "sendVerificationTimeoutMs": 45000,
+    "automaticSendAttempts": 3,
     "firefoxBinary": "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
-    "firefoxProfileDirectory": "C:\\Users\\YOUR_USER\\AppData\\Local\\CinDa-DaWatcha\\FirefoxProfile"
+    "firefoxProfileDirectory": "C:\\Users\\YOUR_USER\\AppData\\Local\\CinDa-DaWatcha\\FirefoxProfile",
+    "geckoDriverPath": "C:\\Program Files\\CinDa-DaWatcha\\geckodriver.exe",
+    "deliveryStatePath": "C:\\Users\\YOUR_USER\\AppData\\Local\\CinDa-DaWatcha\\delivery-state.json"
   },
-  "watches": [
+  "jobs": [
     {
-      "id": "worker-01",
+      "id": "training-run-01",
       "enabled": false,
-      "process": {
-        "pid": 12345,
-        "name": "worker.exe",
-        "executablePath": "C:\\Apps\\Worker\\worker.exe",
-        "startTimeUtc": "2026-08-15T18:42:12Z"
-      },
-      "completion": {
-        "method": "uia-text",
-        "patterns": [
-          "Completed",
-          "Finished",
-          "Done",
-          "Success"
-        ],
-        "windowTitlePattern": ""
-      },
-      "chat": {
-        "uuid": "00000000-0000-0000-0000-000000000000"
-      },
-      "passalongMessage": "Review this completed task and continue with the next step."
+      "initiatingChatUuid": "11111111-2222-3333-4444-555555555555",
+      "recoveryChatUuid": null,
+      "createdAtUtc": "2026-08-15T18:42:12Z",
+      "updatedAtUtc": "2026-08-15T18:42:12Z",
+      "summary": "Train the local model and preserve the resulting checkpoint.",
+      "participants": [
+        {
+          "id": "trainer",
+          "process": {
+            "pid": 12345,
+            "name": "trainer.exe",
+            "executablePath": "C:\\Apps\\Trainer\\trainer.exe",
+            "startTimeUtc": "2026-08-15T18:42:12Z"
+          },
+          "state": "Pending",
+          "updatedAtUtc": "2026-08-15T18:42:12Z",
+          "heartbeatUtc": "2026-08-15T18:42:12Z",
+          "finishedAtUtc": null,
+          "exitCode": null,
+          "detail": "Waiting to start.",
+          "handoffMessage": ""
+        }
+      ]
     }
   ]
 }

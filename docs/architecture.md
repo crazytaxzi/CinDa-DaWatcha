@@ -1,47 +1,59 @@
 # Architecture
 
+## Trust boundary
+
+The job ledger and delivery-state ledger are local files. Process checks use
+Windows APIs through .NET. ChatGPT interaction occurs only through Selenium in
+a dedicated Firefox profile. Production navigation is hard-coded to
+`https://chatgpt.com/c/{canonical-uuid}` with no query or fragment; the watched
+file cannot substitute a host, path, query, script, or command.
+
+There is no OpenAI API client, generic HTTP client, CLI integration, email, or
+webhook in the runtime.
+
 ## Components
 
-### CinDa.DaWatcha.Core
+`CinDa.DaWatcha.Core` strictly parses the ledger, validates the contract,
+fingerprints processes, evaluates group state, constructs deterministic
+messages, persists delivery state atomically, and coordinates retries.
 
-Owns configuration validation, atomic UUID updates, file watching,
-process identity verification, polling, event deduplication, batching,
-and passalong-message construction. It contains no browser or WPF code.
+`CinDa.DaWatcha.App` is the single-instance WPF dashboard and Firefox DOM
+controller. The controller owns one profile and one tab, verifies the exact
+conversation route, waits for stable idle state, refuses to overwrite unrelated
+composer text, clicks Send once per attempt, and verifies the entire user bubble.
 
-### CinDa.DaWatcha.App
+`CinDa.DaWatcha.BrowserSmoke` drives the real Firefox controller against a local
+test page. The alternate origin is internal and test-assembly-only; production
+code always uses ChatGPT.
 
-Provides the WPF dashboard, Windows UI Automation completion detector,
-handoff coordinator, and Selenium-controlled Firefox session.
-
-### CinDa.DaWatcha.BrowserSmoke
-
-Launches the browser controller with a disposable profile to verify
-Selenium, GeckoDriver resolution, Firefox startup, and clean shutdown.
-
-## Browser invariant
-
-The application owns one Firefox process, one window, one tab, and one
-persistent profile. Every conversation change navigates that same tab.
-Unexpected tabs are closed before each browser operation.
-
-## State progression
+## State flow
 
 ```text
-Watching -> Completion/Exit -> Batched by UUID -> Preparing
-Preparing -> Awaiting manual Send -> Browser verification
-Browser verification -> User confirmation -> Completed
+job ledger -> strict reload -> group/process evaluation
+                             | blocked/stale/unresponsive
+                             +--------------------------> warning
+                             | all terminal + all exited
+                             +--------------------------> final summary
+
+message -> durable queue -> exact UUID -> wait idle -> prepare -> send -> verify
+                              ^              retry <= configured attempts |
+                              | refresh once + one final attempt           |
+                              +---------- manual fallback <----------------+
 ```
 
-A conversation at or above the byte limit changes the preparation target
-to a new chat. The JSON UUID is not changed until the manually sent
-message produces a valid `/c/{uuid}` URL.
+## Invariants
 
-## Safety invariants
-
-- A PID is actionable only after its complete fingerprint matches.
-- A process run produces no more than one handoff.
-- Configuration writes use a same-directory temporary file and atomic
-  replacement.
-- Self-generated UUID writes are suppressed from hot-reload recursion.
-- The application never invokes ChatGPT's Send control.
-- Different conversation UUIDs are never mixed into one message.
+- A job route is bound durably on its first queued message. Later UUID changes
+  for that job are quarantined as conflicts.
+- A process matches only when PID, normalized name, absolute executable path,
+  and start time match. PID reuse is not accepted.
+- A final message is produced only after every participant is terminal and no
+  matching participant process remains.
+- Delivery IDs and message hashes are deterministic. Restarting does not erase
+  delivered state.
+- Before every Send click, the controller checks whether the complete message
+  already exists in the exact target conversation.
+- A marker alone is not proof of delivery; the whole normalized message must be
+  present in a user-authored bubble.
+- The application never writes the job ledger. External writers may replace it
+  atomically without a suppression window that could hide their edits.

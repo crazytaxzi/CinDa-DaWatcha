@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net8.0-windows7.0": {
+      "Selenium.WebDriver": {
+        "type": "Direct",
+        "requested": "[4.47.0, )",
+        "resolved": "4.47.0",
+        "contentHash": "P6tWCztrMNXpA4av0EDEwpw+jPbefH7BtdSU05aAldkCUrZF537uBTkHj+A3EcgpbcGGr6uj61UDy8GO6APhoQ=="
+      },
+      "cinda.dawatcha.core": {
+        "type": "Project"
+      }
+    },
+    "net8.0-windows7.0/win-x64": {
+      "Selenium.WebDriver": {
+        "type": "Direct",
+        "requested": "[4.47.0, )",
+        "resolved": "4.47.0",
+        "contentHash": "P6tWCztrMNXpA4av0EDEwpw+jPbefH7BtdSU05aAldkCUrZF537uBTkHj+A3EcgpbcGGr6uj61UDy8GO6APhoQ=="
+      }
+    }
+  }
+}
